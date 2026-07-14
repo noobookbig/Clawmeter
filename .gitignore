@@ -1,0 +1,27 @@
+# ── build artifacts ─────────────────────────────────────────────────────
+firmware/.pio/
+firmware/.vscode/
+firmware/.clangd/
+
+# Python venv (used by build tooling)
+.venv/
+.codex-tmp/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# Logs / coverage
+*.log
+*.tmp
+.pytest_cache/
+__pycache__/
+
+# Release binaries — produced by build, not source. Keep them out so
+# `git clone` stays small. Regenerate via the build script.
+release/
+
+# Local docs scratch
+docs/.drafts/
