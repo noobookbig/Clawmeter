@@ -29,17 +29,15 @@ rem ── Provider setup wizard (only when --setup) ─────────
 :setup_prompt
 if defined FORCE_SETUP goto :show_setup_menu
 
-rem If TRAY_CONFIG already has a known provider, skip the menu silently and
-rem proceed. We used to call findstr to detect this, but that proved
-rem unreliable across MSYS / WSL / different cmd hosts — the search could
-rem fall through even when the file clearly contains the key. To avoid the
-rem auto-loop hanging on `set /p` waiting for stdin on a double-click that
-rem has no TTY, we just inspect the file directly with a for /f loop and
-rem bail to the default provider if anything looks off.
+rem Read the provider straight out of the JSON file (no grep/findstr/choice
+rem involved — the old auto-detect path was fragile on different cmd hosts
+rem and a hang-prone `choice` could lock the window). Use a simple for /f
+rem that splits on the colon after the provider key.
 set "CURRENT_PROVIDER="
 if exist "%TRAY_CONFIG%" (
-    for /f "usebackq tokens=2 delims=:, " %%p in (`findstr /i "provider" "%TRAY_CONFIG%"`) do (
-        set "CURRENT_PROVIDER=%%~p"
+    for /f "usebackq tokens=1* delims=:" %%a in ("%TRAY_CONFIG%") do (
+        set "LINE=%%a"
+        call :_parse_provider_line "%%LINE%%"
     )
 )
 if defined CLAWDMETER_PROVIDER set "CURRENT_PROVIDER=%CLAWDMETER_PROVIDER%"
@@ -54,18 +52,28 @@ if /i "%CURRENT_PROVIDER%"=="go" (
         goto :setup_opencode_go
     )
 )
-rem No interactive prompt. If TRAY_CONFIG is missing or unreadable we just
-rem default to claude and let the user re-run with --setup to change it.
 if not defined CURRENT_PROVIDER set "CURRENT_PROVIDER=claude"
 goto :after_setup
 
+rem Helper: extract provider value from a line like '"provider": "minimax",'
+:_parse_provider_line
+set "LINE_NOQUOTES=%~1"
+set "LINE_CLEANED=%LINE_NOQUOTES:"=%
+for /f "tokens=1* delims=:" %%x in ("%LINE_CLEANED%") do (
+    set "KEY=%%x"
+    set "VAL=%%y"
+    if /i "%KEY: =%"=="provider" set "CURRENT_PROVIDER=%VAL: =%"
+)
+goto :eof
+
 :check_go_cookie
-rem Legacy alias for the old flow — kept so the :show_setup_menu jump
-rem still resolves when TRAY_CONFIG was OK but choice() above already ran.
+rem Legacy alias — kept so the :show_setup_menu jump still resolves
+rem when --setup was forced. Same logic as the main flow.
 set "CURRENT_PROVIDER=claude"
 if exist "%TRAY_CONFIG%" (
-    for /f "tokens=2 delims=:" %%p in ('findstr "provider" "%TRAY_CONFIG%"') do (
-        set "CURRENT_PROVIDER=%%~p"
+    for /f "usebackq tokens=1* delims=:" %%a in ("%TRAY_CONFIG%") do (
+        set "LINE=%%a"
+        call :_parse_provider_line "%%LINE%%"
     )
 )
 set "CURRENT_PROVIDER=%CURRENT_PROVIDER:"=%
@@ -197,14 +205,19 @@ echo Enabling Start at login...
 if errorlevel 1 goto fail
 
 echo Starting Clawdmeter tray...
-rem Spawn the tray detached. pythonw is windowless so /MIN has no visible
-rem effect, but using /B alone also hides any flash. With pythonw inheriting
-rem the parent's console handle, anything we print in tray_windows.py
-rem (boot log, etc.) would write to that handle — which becomes invalid the
-rem moment cmd exits. So we redirect explicitly to NUL: the pythonw child
-rem gets the void handles from creation, and our debug logs after launch
-rem go to NUL instead of a broken pipe. exit /b then closes cmd cleanly.
-start /B "" "%REPO_ROOT%\.venv\Scripts\pythonw.exe" "%REPO_ROOT%\daemon\tray_windows.py" <nul 1>nul 2>nul
+rem Spawn the tray via PowerShell Start-Process, which fully detaches the
+rem child from the parent's console — unlike cmd's `start /B` which on some
+rem Windows builds still keeps the parent's std handles referenced until the
+rem child explicitly closes them. PS makes a clean break, so the cmd window
+rem really does close. Stdin/out/err all redirected to NUL so the daemon
+rem doesn't even see a console to attach to.
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "Start-Process -FilePath '%REPO_ROOT%\.venv\Scripts\pythonw.exe' ^
+   -ArgumentList @('%REPO_ROOT%\daemon\tray_windows.py',) ^
+   -WindowStyle Hidden ^
+   -RedirectStandardInput 'NUL' ^
+   -RedirectStandardOutput 'NUL' ^
+   -RedirectStandardError 'NUL' ^> NUL"
 exit /b 0
 
 :find_uv
