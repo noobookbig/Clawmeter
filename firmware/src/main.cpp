@@ -54,7 +54,10 @@ static void note_touch_sample(bool pressed) {
 #define BUF_LINES 40
 #define LV_BUF_CAPS (MALLOC_CAP_SPIRAM)
 #else
-#define BUF_LINES 20
+// CYD 320×240 in landscape — 10-line strip is enough for partial render.
+// Tighter than 20 to leave headroom for static BSS of NimBLE / lvgl on regular
+// ESP32 (320 KB DRAM, no auto PSRAM BSS placement).
+#define BUF_LINES 10
 #define LV_BUF_CAPS (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
 #endif
 static uint16_t* buf1 = nullptr;
