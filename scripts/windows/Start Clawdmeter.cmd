@@ -205,19 +205,20 @@ echo Enabling Start at login...
 if errorlevel 1 goto fail
 
 echo Starting Clawdmeter tray...
-rem Spawn the tray via PowerShell Start-Process, which fully detaches the
-rem child from the parent's console — unlike cmd's `start /B` which on some
-rem Windows builds still keeps the parent's std handles referenced until the
-rem child explicitly closes them. PS makes a clean break, so the cmd window
-rem really does close. Stdin/out/err all redirected to NUL so the daemon
-rem doesn't even see a console to attach to.
-powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "Start-Process -FilePath '%REPO_ROOT%\.venv\Scripts\pythonw.exe' ^
-   -ArgumentList @('%REPO_ROOT%\daemon\tray_windows.py',) ^
-   -WindowStyle Hidden ^
-   -RedirectStandardInput 'NUL' ^
-   -RedirectStandardOutput 'NUL' ^
-   -RedirectStandardError 'NUL' ^> NUL"
+rem Generate a tiny VBScript launcher in %TEMP% that uses WScript.Shell.Run
+rem with bHideWindow=0 (SW_HIDE) and bWaitOnReturn=False. VBScript's Run
+rem truly detaches the child from the parent's console — it doesn't share
+rem the std handle set the way start /B does, so the parent cmd can exit
+rem cleanly the moment Run returns. The VBS file lives only for the
+rem duration of the spawn, then deletes itself.
+set "VBS=%TEMP%\Clawdmeter_launcher_%RANDOM%.vbs"
+(
+    echo Set WshShell = WScript.CreateObject^("WScript.Shell"^)
+    echo WshShell.Run Chr^(34^) ^& "%REPO_ROOT%\.venv\Scripts\pythonw.exe" ^& Chr^(34^) ^& " " ^& Chr^(34^) ^& "%REPO_ROOT%\daemon\tray_windows.py" ^& Chr^(34^), 0, False
+    echo Set fso = CreateObject^("Scripting.FileSystemObject"^)
+    echo fso.DeleteFile "%VBS%"
+) > "%VBS%"
+wscript //nologo "%VBS%"
 exit /b 0
 
 :find_uv

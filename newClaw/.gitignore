@@ -1,0 +1,23 @@
+# ── .NET build outputs ─────────────────────────────────────────────────
+bin/
+obj/
+*.user
+*.suo
+.vs/
+
+# ── Published binaries (regenerate via scripts/publish.ps1) ───────────
+dist/
+publish/
+
+# ── IDE / tooling noise ─────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+
+# ── OS noise ─────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Logs (the runtime logger writes to %APPDATA%\Clawmeter\logs\) ───
+*.log
+logs/
