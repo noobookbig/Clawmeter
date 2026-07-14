@@ -24,24 +24,45 @@ for %%a in (%*) do (
     if /i "%%a"=="-s" set "FORCE_SETUP=1"
 )
 
-rem ── Provider setup wizard ───────────────────────────────────────────────
+rem ── Provider setup wizard (only when --setup) ──────────────────────────
 
 :setup_prompt
 if defined FORCE_SETUP goto :show_setup_menu
 
-rem Check if already configured
+rem If TRAY_CONFIG already has a known provider, skip the menu silently and
+rem proceed. We used to call findstr to detect this, but that proved
+rem unreliable across MSYS / WSL / different cmd hosts — the search could
+rem fall through even when the file clearly contains the key. To avoid the
+rem auto-loop hanging on `set /p` waiting for stdin on a double-click that
+rem has no TTY, we just inspect the file directly with a for /f loop and
+rem bail to the default provider if anything looks off.
+set "CURRENT_PROVIDER="
 if exist "%TRAY_CONFIG%" (
-    findstr /i "provider" "%TRAY_CONFIG%" >nul 2>nul
-    if !errorlevel! equ 0 goto :check_go_cookie
+    for /f "usebackq tokens=2 delims=:, " %%p in (`findstr /i "provider" "%TRAY_CONFIG%"`) do (
+        set "CURRENT_PROVIDER=%%~p"
+    )
 )
-if defined CLAWDMETER_PROVIDER goto :check_go_cookie
-
-goto :show_setup_menu
+if defined CLAWDMETER_PROVIDER set "CURRENT_PROVIDER=%CLAWDMETER_PROVIDER%"
+if /i "%CURRENT_PROVIDER%"=="go" (
+    if exist "%GO_CRED_FILE%" (
+        echo.
+        echo OpenCode Go credentials found.
+        echo Press R to refresh auth cookie, or any other key to continue...
+        choice /c RN /n /t 5 /d N >nul 2>nul
+        if !errorlevel! equ 1 goto :setup_opencode_go
+    ) else (
+        goto :setup_opencode_go
+    )
+)
+rem No interactive prompt. If TRAY_CONFIG is missing or unreadable we just
+rem default to claude and let the user re-run with --setup to change it.
+if not defined CURRENT_PROVIDER set "CURRENT_PROVIDER=claude"
+goto :after_setup
 
 :check_go_cookie
-rem If provider is OpenCode Go and cred file exists, ask about refresh
+rem Legacy alias for the old flow — kept so the :show_setup_menu jump
+rem still resolves when TRAY_CONFIG was OK but choice() above already ran.
 set "CURRENT_PROVIDER=claude"
-if defined CLAWDMETER_PROVIDER set "CURRENT_PROVIDER=%CLAWDMETER_PROVIDER%"
 if exist "%TRAY_CONFIG%" (
     for /f "tokens=2 delims=:" %%p in ('findstr "provider" "%TRAY_CONFIG%"') do (
         set "CURRENT_PROVIDER=%%~p"
