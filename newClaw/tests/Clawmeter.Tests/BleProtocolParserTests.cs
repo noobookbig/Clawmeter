@@ -5,8 +5,8 @@ using Xunit;
 namespace Clawmeter.Tests;
 
 /// <summary>
-/// Round-trip test for the wire JSON shape — anything we serialize here
-/// is what the firmware's usage_parse_json() will see. Catches drift early.
+/// Round-trip test for the wire JSON shape. Anything we serialize here is
+/// what the firmware's usage_parse_json() will see. Catches drift early.
 /// </summary>
 public sealed class BleProtocolParserTests
 {
@@ -48,5 +48,37 @@ public sealed class BleProtocolParserTests
         Assert.Equal("Claude",     ProviderId.Claude.ToLabel());
         Assert.Equal("Codex",      ProviderId.Codex.ToLabel());
         Assert.Equal("OpenRouter", ProviderId.OpenRouter.ToLabel());
+    }
+
+    [Fact]
+    public void PayloadSerializer_CompactFormat_MatchesPythonDaemon()
+    {
+        // The Python daemon's _payload_for_wire calls
+        //   json.dumps(wire_payload, separators=(",", ":"))
+        // Our default JsonSerializer settings don't add whitespace between
+        // tokens, so the byte output should be the same shape.
+        var payload = new UsagePayload
+        {
+            Provider = "minimax",
+            Mode     = "window",
+            Top      = new PanelPayload { Pct = 50 },
+            Bottom   = new PanelPayload { Pct = 50 },
+        };
+        var json = PayloadSerializer.Serialize(payload);
+        var s = System.Text.Encoding.UTF8.GetString(json);
+        // No whitespace between elements (Python's `separators=(",", ":")`).
+        Assert.DoesNotContain(": ", s);
+        Assert.DoesNotContain(", ", s);
+    }
+
+    [Fact]
+    public void BleProtocol_UUIDs_MatchFirmware()
+    {
+        // These UUIDs are baked into both firmware (ble.cpp) and the
+        // Windows service. Any drift here breaks the BLE link silently.
+        Assert.Equal("4c41555a-4465-7669-6365-000000000001", BleProtocol.ServiceUuid);
+        Assert.Equal("4c41555a-4465-7669-6365-000000000002", BleProtocol.RxCharUuid);
+        Assert.Equal("4c41555a-4465-7669-6365-000000000003", BleProtocol.TxCharUuid);
+        Assert.Equal("4c41555a-4465-7669-6365-000000000004", BleProtocol.ReqCharUuid);
     }
 }

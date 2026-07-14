@@ -3,7 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:tb="http://www.hardcodet.net/taskbar"
         Title="Clawmeter"
-        Height="380" Width="520"
+        Height="420" Width="540"
         WindowStartupLocation="CenterScreen"
         ShowInTaskbar="False"
         Background="{DynamicResource MahApps.Brushes.Window.Background}">
@@ -11,12 +11,13 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
         <StackPanel Grid.Row="0" Orientation="Vertical" Margin="0,0,0,12">
             <TextBlock Text="Clawmeter" FontSize="22" FontWeight="Bold" />
             <TextBlock x:Name="StatusText"
-                       Text="Connecting..."
+                       Text="Starting..."
                        FontSize="13"
                        Opacity="0.7" />
         </StackPanel>
@@ -25,7 +26,7 @@
 
             <!-- Tray icon + context menu -->
             <tb:TaskbarIcon x:Name="TrayIcon"
-                            IconSource="app.ico"
+                            IconSource="/Resources/app.ico"
                             ToolTipText="Clawmeter">
                 <tb:TaskbarIcon.ContextMenu>
                     <ContextMenu>
@@ -44,12 +45,14 @@
                             <MenuItem Header="OpenRouter" Click="OnProviderOpenRouter" />
                         </MenuItem>
                         <Separator />
+                        <MenuItem Header="Set MiniMax API key…" Click="OnSetApiKeyClicked" />
+                        <MenuItem Header="Open log folder" Click="OnOpenLogClicked" />
+                        <Separator />
                         <MenuItem Header="Quit" Click="OnQuitClicked" />
                     </ContextMenu>
                 </tb:TaskbarIcon.ContextMenu>
             </tb:TaskbarIcon>
 
-            <!-- Main content: status + actions -->
             <Border Padding="12" CornerRadius="6"
                     Background="{DynamicResource MahApps.Brushes.Control.Background}">
                 <StackPanel>
@@ -82,5 +85,9 @@
                 </StackPanel>
             </Border>
         </StackPanel>
+
+        <Grid Grid.Row="2" Margin="0,8,0,0">
+            <TextBlock x:Name="FooterText" Opacity="0.55" FontSize="11" />
+        </Grid>
     </Grid>
 </Window>

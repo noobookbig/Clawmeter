@@ -3,22 +3,33 @@ using Microsoft.Extensions.Logging;
 namespace Clawmeter.Service.Services;
 
 /// <summary>
-/// Brightness control port. Replaces daemon/brightness.py:
-///   * SetPct(pct) writes the new value to firmware NVS (via BLE char)
-///     and updates the running display via display_hal_set_brightness.
-///   * GetPct() reads the last-applied value from firmware on demand.
-/// On the C# side we just proxy the call to BleLinkService — the C
-/// implementation lands in M4.
+/// Brightness control port. Replaces daemon/brightness.py — the firmware
+/// accepts a top-level "brightness": N in the JSON payload, so we apply
+/// the override before each write instead of holding a separate handle.
 /// </summary>
 public sealed class BrightnessController
 {
     private readonly ILogger<BrightnessController> _log;
+    private readonly ConfigService _config;
 
-    public BrightnessController(ILogger<BrightnessController> log)
+    public BrightnessController(ILogger<BrightnessController> log, ConfigService config)
     {
         _log = log;
+        _config = config;
     }
 
-    public Task SetPctAsync(int pct, CancellationToken ct) => Task.CompletedTask;
-    public Task<int> GetPctAsync() => Task.FromResult(75);
+    public Task SetPctAsync(int pct, CancellationToken ct)
+    {
+        if (pct < 0) pct = 0;
+        if (pct > 100) pct = 100;
+        _log.LogInformation("Brightness set: {Pct}%", pct);
+        // Update config so the next poll picks it up; the actual firmware
+        // write happens in BleLinkService via PayloadReady.
+        return _config.SaveAsync(_config.Current with { BrightnessPct = pct });
+    }
+
+    public Task<int> GetPctAsync()
+    {
+        return Task.FromResult(_config.Current.BrightnessPct);
+    }
 }

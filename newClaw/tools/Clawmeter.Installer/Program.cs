@@ -34,16 +34,26 @@ public static class Program
 
     private static int Install()
     {
-        var serviceExe = Path.Combine(
-            AppContext.BaseDirectory, "Clawmeter.Service.exe");
+        var serviceExe = Path.Combine(AppContext.BaseDirectory, "Clawmeter.Service.exe");
+        var logDir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            "Clawmeter", "logs");
+        Directory.CreateDirectory(logDir);
+
         if (!File.Exists(serviceExe))
             return Fail($"service binary not found: {serviceExe}");
 
         var binPath = $"\"{serviceExe}\"";
-        var display  = "Clawmeter Usage Monitor";
-        Run("sc.exe", $"create ClawmeterSvc binPath= {binPath} start= auto DisplayName= \"{display}\"");
-        Run("sc.exe",  "description ClawmeterSvc \"BLE bridge to ESP32 + MiniMax usage polling\"");
+        var display = "Clawmeter Usage Monitor";
+        var description = "BLE bridge to ESP32 + MiniMax usage polling. Service-mode (no console).";
+
+        // Register + start. Start=auto means the SCM auto-restarts on crash.
+        Run("sc.exe", $"create ClawmeterSvc binPath= {binPath} start= auto DisplayName= \"{display}\" obj= LocalSystem");
+        Run("sc.exe", $"description  ClawmeterSvc \"{description}\"");
+        Run("sc.exe",  "failure ClawmeterSvc reset= 5 seconds actions= restart/5000/restart/5000/restart/5000");
         Run("sc.exe",  "start ClawmeterSvc");
+        Console.WriteLine("Clawmeter service installed and started.");
+        Console.WriteLine("Log directory: " + logDir);
         return 0;
     }
 
@@ -67,11 +77,21 @@ public static class Program
             RedirectStandardOutput = redirectOutput,
             RedirectStandardError  = redirectOutput,
             UseShellExecute        = false,
+            Verb                   = "runas",  // UAC: request elevation if needed
+            CreateNoWindow         = true,
         };
-        using var p = Process.Start(psi)!;
-        p.WaitForExit();
-        if (redirectOutput) Console.WriteLine(p.StandardOutput.ReadToEnd());
-        return p.ExitCode;
+        try
+        {
+            using var p = Process.Start(psi)!;
+            p.WaitForExit();
+            if (redirectOutput) Console.WriteLine(p.StandardOutput.ReadToEnd());
+            return p.ExitCode;
+        }
+        catch (System.ComponentModel.Win32Exception ex) when (ex.NativeErrorCode == 1223)
+        {
+            // UAC cancelled
+            return Fail("admin elevation required to manage Windows service");
+        }
     }
 
     private static int Fail(string msg)
