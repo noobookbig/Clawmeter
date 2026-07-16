@@ -1,0 +1,550 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Clawdmeter Neon Quad-Glow — Cyan/Magenta/Orange/Green · Landscape 320×240 · ILI9341</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --screen: #07080c;
+      --panel-edge: rgba(255,255,255,.10);
+      --grid: rgba(255,255,255,.045);
+      --text: #f5f1e8;
+      --muted: #a9b2c2;
+      --track: #1c2029;
+
+      --cyan:    #00e5ff;
+      --magenta: #ff2bd6;
+      --red:     #ff3355;
+      --orange:  #ff9a3c;
+      --green:   #35e08a;
+    }
+    body {
+      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 14% -10%, rgba(0,229,255,.10) 0%, transparent 36%),
+        radial-gradient(circle at 88% -6%, rgba(255,43,214,.08) 0%, transparent 38%),
+        radial-gradient(circle at 90% 112%, rgba(53,224,138,.07) 0%, transparent 42%),
+        radial-gradient(circle at 8% 110%, rgba(255,154,60,.07) 0%, transparent 42%),
+        radial-gradient(circle at 50% 118%, rgba(255,51,85,.06) 0%, transparent 40%),
+        linear-gradient(180deg, #0a0814 0%, #050309 100%);
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+    }
+    .stage {
+      width: min(100%, 1080px);
+      display: grid;
+      grid-template-columns: 320px 1fr;
+      gap: 42px;
+      align-items: center;
+    }
+    .copy { display: grid; gap: 16px; }
+    .eyebrow {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 7px 12px; border-radius: 999px; width: fit-content;
+      background: rgba(255,255,255,.04);
+      border: 1px solid rgba(255,255,255,.09);
+      color: #d9d4c8; font-size: 12px; font-weight: 700;
+    }
+    .eyebrow::before {
+      content: ""; width: 8px; height: 8px; border-radius: 999px;
+      background: linear-gradient(90deg, var(--cyan), var(--magenta));
+      box-shadow: 0 0 10px rgba(0,229,255,.6);
+      animation: hueDot 6s linear infinite;
+    }
+    @keyframes hueDot { 0%{filter:hue-rotate(0)} 100%{filter:hue-rotate(360deg)} }
+    .copy h1 {
+      font-size: 32px; line-height: 1.03; letter-spacing: -.045em;
+      background: linear-gradient(90deg, var(--cyan), var(--magenta) 30%, var(--red) 50%, var(--orange) 72%, var(--green));
+      background-size: 300% 100%;
+      -webkit-background-clip: text; background-clip: text; color: transparent;
+      animation: titleSweep 9s ease-in-out infinite;
+    }
+    @keyframes titleSweep { 0%,100%{background-position:0% 0} 50%{background-position:100% 0} }
+    .copy p { font-size: 14px; line-height: 1.55; color: #cdd4e0; }
+    .tags { display: flex; flex-wrap: wrap; gap: 8px; }
+    .tag {
+      padding: 6px 10px; border-radius: 10px;
+      background: rgba(255,255,255,.035);
+      border: 1px solid rgba(255,255,255,.08);
+      font-size: 12px; color: #d8d4ca;
+    }
+    .tag.c { border-color: rgba(0,229,255,.45);   color: #8ff3ff; }
+    .tag.m { border-color: rgba(255,43,214,.45);  color: #ff9cef; }
+    .tag.r { border-color: rgba(255,51,85,.5);    color: #ff8a9c; }
+    .tag.o { border-color: rgba(255,154,60,.5);   color: #ffc38a; }
+    .tag.g { border-color: rgba(53,224,138,.5);   color: #9af5c4; }
+    .switches { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+    button {
+      appearance: none; border: 1px solid rgba(255,255,255,.10);
+      background: rgba(255,255,255,.03); color: var(--text);
+      padding: 10px 14px; border-radius: 11px; cursor: pointer;
+      font-size: 12px; font-weight: 700; letter-spacing: -.01em;
+      transition: .16s ease;
+    }
+    button:hover { transform: translateY(-1px); border-color: rgba(0,229,255,.4); }
+    button.active {
+      background: linear-gradient(90deg, var(--cyan), var(--magenta));
+      color: #05070c; border-color: transparent;
+      box-shadow: 0 8px 22px rgba(0,229,255,.22);
+    }
+
+    /* ---------- Device shell ---------- */
+    .frame {
+      justify-self: center;
+      background: linear-gradient(180deg, #2d3036, #202328);
+      padding: 18px; border-radius: 34px;
+      box-shadow: 0 28px 80px rgba(0,0,0,.72);
+    }
+    .device {
+      width: 320px; height: 240px; border-radius: 16px; overflow: hidden;
+      background: #06070a; position: relative;
+      border: 1px solid rgba(255,255,255,.07);
+    }
+    .screen {
+      position: absolute; inset: 0; padding: 8px 10px 7px;
+      display: flex; flex-direction: column;
+      background:
+        linear-gradient(var(--grid) 1px, transparent 1px),
+        linear-gradient(90deg, var(--grid) 1px, transparent 1px),
+        radial-gradient(circle at top, rgba(0,229,255,.10) 0%, transparent 30%),
+        var(--screen);
+      background-size: 14px 14px, 14px 14px, auto, auto;
+    }
+    /* Ambient four-colour aurora that slowly drifts behind the content */
+    .screen::before {
+      content: ""; position: absolute; inset: -40%;
+      background:
+        radial-gradient(circle at 20% 30%, rgba(0,229,255,.14), transparent 30%),
+        radial-gradient(circle at 80% 25%, rgba(255,43,214,.12), transparent 32%),
+        radial-gradient(circle at 78% 82%, rgba(53,224,138,.12), transparent 32%),
+        radial-gradient(circle at 22% 80%, rgba(255,154,60,.12), transparent 32%),
+        radial-gradient(circle at 50% 55%, rgba(255,51,85,.10), transparent 30%);
+      filter: blur(6px);
+      animation: aurora 14s ease-in-out infinite;
+      pointer-events: none; z-index: 0;
+    }
+    @keyframes aurora {
+      0%,100% { transform: translate(0,0) rotate(0deg); }
+      50%     { transform: translate(4%, -3%) rotate(8deg); }
+    }
+    .screen > * { position: relative; z-index: 1; }
+
+    /* ---------- Header ---------- */
+    .header {
+      display: flex; justify-content: space-between; align-items: center;
+      height: 58px; padding-bottom: 8px; flex-shrink: 0;
+    }
+    .header-left { display: flex; align-items: center; }
+    .brand-chip {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 56px; height: 54px; position: relative;
+    }
+    .brand-chip::after {
+      content: ""; position: absolute; inset: 2px; border-radius: 12px;
+      background: conic-gradient(from 0deg, var(--cyan), var(--magenta), var(--red), var(--orange), var(--green), var(--cyan));
+      filter: blur(7px); opacity: .28; z-index: -1;
+      animation: spinHue 8s linear infinite;
+    }
+    @keyframes spinHue { 100% { transform: rotate(360deg); } }
+    .brand-chip canvas { display: block; image-rendering: pixelated; width: 52px; height: 52px; }
+    .title {
+      flex: 1; text-align: left; padding-left: 10px;
+      font-size: 25px; font-weight: 800; letter-spacing: -.035em; line-height: 1;
+      display: flex; flex-direction: column; justify-content: center; gap: 5px;
+    }
+    .title .title-text {
+      background: linear-gradient(90deg, var(--cyan), var(--magenta) 40%, var(--red) 60%, var(--orange));
+      background-size: 260% 100%;
+      -webkit-background-clip: text; background-clip: text; color: transparent;
+      animation: titleSweep 7s ease-in-out infinite;
+    }
+    .provider-badge {
+      font-size: 9px; font-weight: 700; letter-spacing: .06em; color: var(--muted);
+      text-transform: uppercase; padding: 1px 6px; border-radius: 4px;
+      background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.09);
+      width: fit-content;
+    }
+    .header-right { display: flex; align-items: center; gap: 7px; justify-content: flex-end; }
+    .wifi-header-icon {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 15px; height: 16px; color: var(--green);
+      filter: drop-shadow(0 0 4px rgba(53,224,138,.5));
+    }
+    .ble-header-icon {
+      display: flex; align-items: center; justify-content: center;
+      width: 12px; height: 15px; color: var(--cyan);
+      filter: drop-shadow(0 0 4px rgba(0,229,255,.45));
+    }
+    .agent-link {
+      position: relative; width: 22px; height: 22px; border-radius: 7px;
+      background: rgba(53,224,138,.12); border: 1px solid rgba(53,224,138,.30);
+    }
+    .agent-link::before, .agent-link::after { content:""; position:absolute; border-radius:999px; background: var(--green); }
+    .agent-link::before { width:5px; height:5px; top:4px; left:4px; box-shadow: 9px 0 0 var(--green), 5px 9px 0 var(--green); }
+    .agent-link::after  { width:10px; height:3px; left:4px; top:8px; box-shadow: 0 -4px 0 rgba(53,224,138,.7), 0 4px 0 rgba(53,224,138,.7); }
+
+    /* ---------- Data flow (four-colour stream) ---------- */
+    .data-flow {
+      display: flex; align-items: center; gap: 5px; height: 8px;
+      margin: -3px 0 7px 0; flex-shrink: 0; position: relative; overflow: hidden;
+    }
+    .data-flow .track {
+      flex: 1; height: 2px; border-radius: 999px;
+      background: rgba(255,255,255,.05); overflow: hidden;
+    }
+    .data-flow .track .fill {
+      height: 100%; width: 55%; border-radius: 999px;
+      background: linear-gradient(90deg, transparent, var(--cyan), var(--magenta), var(--red), var(--orange), var(--green), transparent);
+      background-size: 200% 100%;
+      animation: dataStream 1.5s ease-in-out infinite, hueRun 6s linear infinite;
+      box-shadow: 0 0 8px rgba(0,229,255,.4);
+    }
+    @keyframes hueRun { 100% { filter: hue-rotate(360deg); } }
+    .data-flow .pulse {
+      width: 4px; height: 4px; border-radius: 999px; background: var(--cyan);
+      box-shadow: 0 0 0 2px rgba(0,229,255,.22), 0 0 8px rgba(0,229,255,.65);
+      flex: 0 0 auto; animation: dataDot 1.5s ease-in-out infinite;
+    }
+    @keyframes dataStream { 0%,100%{transform:translateX(-30%);opacity:.35} 50%{transform:translateX(30%);opacity:1} }
+    @keyframes dataDot { 0%,100%{opacity:.4} 50%{opacity:1} }
+
+    /* ---------- State switching ---------- */
+    .state { display: none; flex: 1; }
+    .screen[data-state="usage"] .usage { display: grid; }
+    .screen[data-state="pair"]  .pair  { display: flex; }
+    .screen[data-state="idle"]  .idle  { display: flex; }
+    .screen[data-state="idle"] .header,
+    .screen[data-state="idle"] .data-flow { display: none; }
+
+    /* ---------- Usage cards ---------- */
+    .usage { grid-template-columns: 1fr; gap: 7px; }
+    .card {
+      position: relative; border-radius: 12px; padding: 6px 11px 6px;
+      display: grid; gap: 4px; align-content: start; overflow: hidden;
+      background:
+        linear-gradient(180deg, rgba(20,24,32,.96), rgba(12,15,22,.96)) padding-box,
+        var(--edge, linear-gradient(120deg, rgba(255,255,255,.14), rgba(255,255,255,.03))) border-box;
+      border: 1px solid transparent;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.05);
+    }
+    /* rotating conic sheen */
+    .card::after {
+      content:''; position:absolute; top:-100%; left:-50%; width:200%; height:200%;
+      background: conic-gradient(from 0deg at 50% 50%, transparent 0deg, transparent 300deg, rgba(255,255,255,.02) 312deg, transparent 324deg, transparent 360deg);
+      animation: cardShine 6s ease-in-out infinite; pointer-events:none;
+    }
+    @keyframes cardShine { 0%,100%{transform:rotate(0)} 50%{transform:rotate(360deg)} }
+
+    .card.primary {
+      --edge: linear-gradient(120deg, var(--cyan), rgba(255,43,214,.5));
+      animation: pulseCyan 4s ease-in-out infinite;
+    }
+    @keyframes pulseCyan {
+      0%,100% { box-shadow: inset 0 1px 0 rgba(255,255,255,.04), 0 0 0 1px rgba(0,229,255,.12), 0 0 22px rgba(0,229,255,.06); }
+      50%     { box-shadow: inset 0 1px 0 rgba(255,255,255,.04), 0 0 0 1px rgba(0,229,255,.28), 0 0 34px rgba(0,229,255,.14); }
+    }
+    .card.secondary {
+      --edge: linear-gradient(120deg, var(--orange), var(--green));
+      animation: pulseWarm 4s ease-in-out infinite;
+    }
+    @keyframes pulseWarm {
+      0%,100% { box-shadow: inset 0 1px 0 rgba(255,255,255,.04), 0 0 0 1px rgba(255,154,60,.12), 0 0 22px rgba(53,224,138,.05); }
+      50%     { box-shadow: inset 0 1px 0 rgba(255,255,255,.04), 0 0 0 1px rgba(255,154,60,.26), 0 0 32px rgba(53,224,138,.12); }
+    }
+
+    .row { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+    .metric {
+      font-size: 27px; line-height: .9; letter-spacing: -.06em; font-weight: 800; color: #f8feff;
+      text-shadow: 0 0 10px rgba(0,229,255,.25), 0 0 6px rgba(255,43,214,.15);
+    }
+    .caption {
+      font-size: 10px; padding: 4px 9px; border-radius: 8px; font-weight: 700;
+      background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.08); color: #f1ede5;
+    }
+    .caption.primary   { background: rgba(0,229,255,.14);  border-color: rgba(0,229,255,.45);  color: #7af6ff; box-shadow: 0 0 12px -2px rgba(0,229,255,.45); text-shadow: 0 0 6px rgba(0,229,255,.5); }
+    .caption.secondary { background: rgba(255,154,60,.14); border-color: rgba(255,154,60,.5);   color: #ffc38a; box-shadow: 0 0 12px -2px rgba(255,154,60,.4);  text-shadow: 0 0 6px rgba(255,154,60,.5); }
+
+    .bar {
+      height: 9px; border-radius: 999px; background: var(--track);
+      overflow: hidden; border: 1px solid rgba(255,255,255,.04); position: relative;
+    }
+    .bar > div {
+      height: 100%; border-radius: 999px;
+      transition: width .8s cubic-bezier(.4,0,.2,1);
+      background-size: 200% 100%;
+      animation: hueRun 5s linear infinite;
+    }
+    .bar > div.b-primary   { background: linear-gradient(90deg, var(--cyan), var(--magenta)); box-shadow: 0 0 10px rgba(0,229,255,.5); }
+    .bar > div.b-secondary { background: linear-gradient(90deg, var(--orange), var(--green)); box-shadow: 0 0 10px rgba(255,154,60,.45); }
+
+    .meta {
+      display: flex; justify-content: space-between; align-items: center; gap: 8px;
+      font-size: 9px; color: var(--muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    .meta .left { display: inline-flex; align-items: center; gap: 4px; }
+    .pill-dot { width: 6px; height: 6px; border-radius: 999px; flex: 0 0 auto; }
+    .pill-dot.cyan  { background: var(--cyan);  box-shadow: 0 0 0 2px rgba(0,229,255,.15); }
+    .pill-dot.green { background: var(--green); box-shadow: 0 0 0 2px rgba(53,224,138,.15); }
+
+    /* ---------- Pairing ---------- */
+    .pair { align-items: center; justify-content: center; }
+    .pair-simple { display: flex; align-items: center; justify-content: space-around; width: 100%; }
+    .pair-hero { position: relative; display: flex; align-items: center; justify-content: center; width: 92px; height: 92px; flex-shrink: 0; }
+    .scan-ring { position: absolute; width: 80px; height: 80px; }
+    .scan-ring .ring { position: absolute; inset: 0; border-radius: 50%; border: 2.5px solid var(--cyan); animation: scanPulse 2.4s ease-out infinite; }
+    .scan-ring .r2 { border-color: var(--magenta); animation-delay: .8s; }
+    .scan-ring .r3 { border-color: var(--green);   animation-delay: 1.6s; }
+    @keyframes scanPulse { 0%{transform:scale(.35);opacity:1} 100%{transform:scale(1.7);opacity:0} }
+    .ble-icon svg { width: 26px; height: 42px; color: var(--cyan); filter: drop-shadow(0 0 6px rgba(0,229,255,.6)); }
+    .pair-steps { display: flex; flex-direction: column; gap: 7px; }
+    .step { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--muted); padding: 5px 10px; border-radius: 6px; }
+    .step.done   { color: var(--cyan); }
+    .step.active { color: var(--text); background: rgba(0,229,255,.12); }
+    .step-dot { width: 5px; height: 5px; border-radius: 999px; flex: 0 0 auto; background: #3a3c40; }
+    .step.active .step-dot { background: var(--magenta); box-shadow: 0 0 0 2px rgba(255,43,214,.2); }
+    .step.done .step-dot   { background: var(--cyan); }
+
+    /* ---------- Idle ---------- */
+    .idle { align-items: center; justify-content: center; flex-direction: column; gap: 4px; }
+    .idle-hero { display: flex; justify-content: center; align-items: center; flex: 1; position: relative; }
+    .idle-hero::before {
+      content: ""; position: absolute; width: 168px; height: 176px; border-radius: 22px;
+      background: conic-gradient(from 0deg, rgba(0,229,255,.06), rgba(255,43,214,.06), rgba(255,51,85,.06), rgba(255,154,60,.06), rgba(53,224,138,.06), rgba(0,229,255,.06));
+      filter: blur(10px); animation: spinHue 12s linear infinite; pointer-events: none;
+    }
+    .idle-hero canvas { display: block; image-rendering: pixelated; width: 150px; height: 152px; animation: idleBreathe 7s ease-in-out infinite; }
+    @keyframes idleBreathe { 0%,100%{opacity:.75; transform:scale(1) translateY(0)} 50%{opacity:1; transform:scale(1.03) translateY(-3px)} }
+    .standby-label {
+      font-size: 12px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; padding-bottom: 6px;
+      background: linear-gradient(90deg, var(--cyan), var(--green));
+      -webkit-background-clip: text; background-clip: text; color: transparent;
+    }
+    .standby-label::after { content:"▏"; -webkit-text-fill-color: var(--muted); margin-left:3px; animation: cursorBlink 1s step-end infinite; }
+    @keyframes cursorBlink { 0%,50%{opacity:1} 51%,100%{opacity:0} }
+
+    /* ---------- Embed (device-only, for screenshots) ---------- */
+    body.embed { padding: 0; background: #101216; }
+    body.embed .stage { width: 100%; grid-template-columns: 1fr; }
+    body.embed .copy { display: none; }
+    body.embed .frame { padding: 0; background: transparent; box-shadow: none; }
+
+    @media (max-width: 900px) { .stage { grid-template-columns: 1fr; } .copy { order: 2; } }
+  </style>
+</head>
+<body>
+  <div class="stage">
+    <section class="copy">
+      <div class="eyebrow">Clawdmeter · Neon Quad-Glow v0.1</div>
+      <h1>Four-colour neon, animation-first</h1>
+      <p>Landscape 320×240 for the ILI9341V panel. Cyan → magenta → red → orange → green run as animated gradients across the title, data stream, card borders and progress bars, over a slow-drifting five-colour aurora. Glow lives on borders and halos so the small RGB565 surface stays crisp.</p>
+      <div class="tags">
+        <span class="tag">landscape 320×240</span>
+        <span class="tag c">cyan #00e5ff</span>
+        <span class="tag m">magenta #ff2bd6</span>
+        <span class="tag r">red #ff3355</span>
+        <span class="tag o">orange #ff9a3c</span>
+        <span class="tag g">green #35e08a</span>
+      </div>
+      <div class="switches">
+        <button class="active" data-target="usage">Remaining</button>
+        <button data-target="pair">Pairing</button>
+        <button data-target="idle">Idle</button>
+      </div>
+    </section>
+
+    <div class="frame">
+      <div class="device">
+        <div class="screen" id="screen" data-state="usage">
+          <div class="header">
+            <div class="header-left">
+              <div class="brand-chip"><canvas id="headerCanvas" width="52" height="52"></canvas></div>
+            </div>
+            <div class="title">
+              <span class="title-text" id="titleText">Remaining</span>
+              <span class="provider-badge" id="titleProvider">CODEX</span>
+            </div>
+            <div class="header-right">
+              <div class="wifi-header-icon" aria-hidden="true">
+                <svg width="15" height="16" viewBox="0 0 14 16" fill="none">
+                  <path d="M1 5 L4 2 L7 1 L10 2 L13 5" stroke="currentColor" stroke-width="1" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+                  <path d="M4 8 L7 6 L10 8" stroke="currentColor" stroke-width="1" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+                  <rect x="6" y="12" width="3" height="3" fill="currentColor" rx="0.5"/>
+                </svg>
+              </div>
+              <div class="ble-header-icon" aria-hidden="true">
+                <svg width="10" height="16" viewBox="0 0 10 16"><path d="M5 16V0M2 4l6 6M8 4L2 10" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </div>
+              <div class="agent-link" aria-label="Agent connected"></div>
+            </div>
+          </div>
+
+          <div class="data-flow" aria-hidden="true">
+            <div class="track"><div class="fill"></div></div>
+            <div class="pulse"></div>
+          </div>
+
+          <div class="state usage">
+            <div class="card primary">
+              <div class="row">
+                <div class="metric" id="metricCurrent">0%</div>
+                <div class="caption primary">Current</div>
+              </div>
+              <div class="bar"><div class="b-primary" id="barCurrent" style="width:0%"></div></div>
+              <div class="meta"><span class="left"><span class="pill-dot cyan"></span>left_now</span><span>reset: 02h14m</span></div>
+            </div>
+            <div class="card secondary">
+              <div class="row">
+                <div class="metric" id="metricWeekly">0%</div>
+                <div class="caption secondary">Weekly</div>
+              </div>
+              <div class="bar"><div class="b-secondary" id="barWeekly" style="width:0%"></div></div>
+              <div class="meta"><span class="left"><span class="pill-dot green"></span>week_left</span><span>reset: 3d04h</span></div>
+            </div>
+          </div>
+
+          <div class="state pair">
+            <div class="pair-simple">
+              <div class="pair-hero">
+                <div class="scan-ring" aria-hidden="true"><div class="ring"></div><div class="ring r2"></div><div class="ring r3"></div></div>
+                <div class="ble-icon" aria-hidden="true">
+                  <svg width="26" height="42" viewBox="0 0 20 32"><path d="M10 32V0M4 8l12 12M16 8L4 20" stroke="currentColor" stroke-width="2.5" fill="none"/></svg>
+                </div>
+              </div>
+              <div class="pair-steps">
+                <div class="step done"><span class="step-dot"></span>Board detected</div>
+                <div class="step active"><span class="step-dot"></span>Establishing link…</div>
+                <div class="step"><span class="step-dot"></span>Agent attached</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="state idle">
+            <div class="idle-hero"><canvas id="idleHeroCanvas" width="150" height="152"></canvas></div>
+            <div class="standby-label">Standing by</div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    if (window.self !== window.top) document.body.classList.add('embed');
+
+    // ---- Pixel-art Clawd frames (3-frame, 20x20, 3-colour) ----
+    const PX = {
+      f: "000000000111000000000000011110011100000000011111110011100000000111110000110100000100001201120111000001111111111111111000011111011110110110000111011111111111100001100001001101111000000100000011111111000000000000111111110000000000001111111100000100000111111111000001000001101111101010111001011011111011111111110111111110101001111110111111111100101111010111111100001101110101000011000000111000000000000000000000011100000000000001111001110000000001111111001110000000011111000011010000010000120112011100000111111111111111100001111101111011011000011101111111111110000110000100110111100000010000001111111100000000000011111111000000000000111111110000010000011111111100000100000110111110101011100101101111101111111111011111111010100111111011111111110010111101011111110000110111010100001100000011100000000000000000000001110000000000000111100111000000000111111100111000000001111100001101000001000012011201110000011111111111111110000111110111101101100001110111111111111000011000010011011110000001000000111111110000000000001111111100000000000011111111000001000001111111110000010000011011111010101110010110111110111111111101111111101010011111101111111111001011110101111111000011011101010000110000001110000000000000",
+      p: ["#0b0d11", "#ece6db", "#dedad0"]
+    };
+
+    // ---- Header pixel animation (with orbiting neon spark) ----
+    const hC = document.getElementById('headerCanvas'), hX = hC && hC.getContext('2d');
+    let hF = null;
+    const HUES = ['rgba(0,229,255,', 'rgba(255,43,214,', 'rgba(255,51,85,', 'rgba(255,154,60,', 'rgba(53,224,138,'];
+    const NHUE = HUES.length;
+    function startH(mode) {
+      if (hF) cancelAnimationFrame(hF); if (!hX) return;
+      let idx = 0, last = 0, dot = 0; hX.imageSmoothingEnabled = false;
+      const speed = mode === 'work' ? 130 : mode === 'idle' ? 600 : 460;
+      const tick = ts => {
+        if (ts - last < speed) { hF = requestAnimationFrame(tick); return; }
+        last = ts; hX.clearRect(0, 0, 52, 52);
+        const off = (idx % 3) * 400, s = 2.6;
+        for (let y = 0; y < 20; y++) for (let x = 0; x < 20; x++) {
+          const v = parseInt(PX.f[off + y * 20 + x]); if (!v) continue;
+          hX.fillStyle = PX.p[v];
+          hX.fillRect(Math.round(x * s), Math.round(y * s), Math.ceil(s), Math.ceil(s));
+        }
+        if (mode === 'work' || mode === 'pair') {
+          dot = (dot + 1) % 120; const t = dot / 120 * Math.PI * 2;
+          const cx = 26, cy = 26, r = 25;
+          const hue = HUES[Math.floor(dot / (120 / NHUE)) % NHUE];
+          hX.shadowColor = hue + '0.6)'; hX.shadowBlur = 7;
+          hX.fillStyle = hue + '0.9)';
+          hX.beginPath(); hX.arc(cx + r * Math.cos(t), cy + r * Math.sin(t), 2.4, 0, Math.PI * 2); hX.fill();
+          hX.shadowBlur = 0;
+        }
+        idx = (idx + 1) % 3; hF = requestAnimationFrame(tick);
+      };
+      hF = requestAnimationFrame(tick);
+    }
+    function stopH() { if (hF) cancelAnimationFrame(hF); if (hX) hX.clearRect(0, 0, 52, 52); }
+
+    // ---- Idle hero animation (breathing Clawd + drifting neon sparks) ----
+    const iC = document.getElementById('idleHeroCanvas'), iX = iC && iC.getContext('2d');
+    let iF = null;
+    function startIdle() {
+      if (iF) cancelAnimationFrame(iF); if (!iX) return;
+      const sparks = [];
+      for (let i = 0; i < 5; i++) sparks.push({ x: 12 + i * 30 + Math.random() * 10, y: 20 + Math.random() * 120, sp: 6 + Math.random() * 10, hue: i % NHUE });
+      let idx = 0, last = 0, ft = 0, phase = 0; iX.imageSmoothingEnabled = false;
+      const tick = ts => {
+        if (ts - last < 50) { iF = requestAnimationFrame(tick); return; }
+        const dt = (ts - last) / 1000; last = ts; phase += dt;
+        iX.clearRect(0, 0, 150, 152);
+        const dim = 0.6 + 0.4 * (0.5 + 0.5 * Math.sin(phase * 0.28));
+        if (++ft % 8 === 0) idx = (idx + 1) % 3;
+        const off = idx * 400, s = 7;
+        for (let y = 0; y < 20; y++) for (let x = 0; x < 20; x++) {
+          const v = parseInt(PX.f[off + y * 20 + x]); if (!v) continue;
+          const c = PX.p[v], r = parseInt(c.slice(1, 3), 16), g = parseInt(c.slice(3, 5), 16), b = parseInt(c.slice(5, 7), 16);
+          iX.fillStyle = 'rgb(' + (r * dim | 0) + ',' + (g * dim | 0) + ',' + (b * dim | 0) + ')';
+          iX.fillRect(x * s + 5, y * s + 8, s, s);
+        }
+        for (const sp of sparks) {
+          sp.y -= sp.sp * dt;
+          if (sp.y < -6) { sp.y = 158; sp.x = 12 + Math.random() * 126; sp.hue = (sp.hue + 1) % NHUE; }
+          const a = (0.35 + 0.35 * Math.sin(phase * 2 + sp.x)) * dim;
+          iX.shadowColor = HUES[sp.hue] + '0.5)'; iX.shadowBlur = 6;
+          iX.fillStyle = HUES[sp.hue] + a.toFixed(2) + ')';
+          iX.fillRect(sp.x, sp.y, 2.5, 2.5); iX.shadowBlur = 0;
+        }
+        iF = requestAnimationFrame(tick);
+      };
+      iF = requestAnimationFrame(tick);
+    }
+    function stopIdle() { if (iF) cancelAnimationFrame(iF); if (iX) iX.clearRect(0, 0, 150, 152); }
+
+    // ---- Usage count-up ----
+    const T_C = 37, T_W = 62;
+    const eC = document.getElementById('metricCurrent'), eW = document.getElementById('metricWeekly');
+    const bC = document.getElementById('barCurrent'), bW = document.getElementById('barWeekly');
+    function animateUsage(show) {
+      if (show) {
+        const start = performance.now(), dur = 800;
+        const tick = ts => {
+          const t = Math.min((ts - start) / dur, 1), e = 1 - Math.pow(1 - t, 3);
+          eC.textContent = Math.round(e * T_C) + '%'; eW.textContent = Math.round(e * T_W) + '%';
+          bC.style.width = e * T_C + '%'; bW.style.width = e * T_W + '%';
+          if (t < 1) requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+      } else { eC.textContent = '0%'; eW.textContent = '0%'; bC.style.width = '0%'; bW.style.width = '0%'; }
+    }
+
+    // ---- State management ----
+    const screen = document.getElementById('screen'), titleText = document.getElementById('titleText');
+    function setState(state) {
+      screen.dataset.state = state; stopIdle(); stopH();
+      titleText.textContent = state === 'usage' ? 'Remaining' : state === 'pair' ? 'Pairing' : 'Standing by';
+      if (state === 'usage') { animateUsage(true); startH('work'); }
+      else if (state === 'idle') { animateUsage(false); startIdle(); }
+      else { animateUsage(false); startH('pair'); }
+    }
+    setState(screen.dataset.state);
+
+    for (const btn of document.querySelectorAll('button[data-target]')) {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('button[data-target]').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active'); setState(btn.dataset.target);
+      });
+    }
+  </script>
+</body>
+</html>

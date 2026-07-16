@@ -41,9 +41,52 @@ LV_FONT_DECLARE(font_ui_bold_48);
 #define COL_ORANGE     THEME_ORANGE
 #define COL_TRACK      THEME_TRACK
 
+// 013 Neon Glow palette — cyan/magenta on dark void. SHARP borders + shadow
+// halos replace solid-fill gradients so the 320x240 ILI9341 R (16-bit
+// RGB565) doesn't band. See sketches/013-landscape-neon-glow.
+#define COL_NEON_CYAN         THEME_NEON_CYAN
+#define COL_NEON_MAGENTA      THEME_NEON_MAGENTA
+#define COL_NEON_VOID         THEME_NEON_VOID
+#define COL_NEON_PANEL        THEME_NEON_PANEL
+#define COL_NEON_PANEL_2      THEME_NEON_PANEL_2
+#define COL_NEON_TRACK        THEME_NEON_TRACK
+#define COL_NEON_GLOW_HI      THEME_NEON_GLOW_HI
+#define COL_NEON_GLOW_HI2     THEME_NEON_GLOW_HI2
+// 014 Quad-Glow: five-colour flow accents (cyan/magenta/red/orange/green).
+#define COL_NEON_RED          THEME_NEON_RED
+#define COL_NEON_ORANGE       THEME_NEON_ORANGE
+#define COL_NEON_GREEN        THEME_NEON_GREEN
+
+// The 5-colour neon sequence, as packed 0xRRGGBB, used by the animated flow
+// strip and the orbiting brand spark. Kept as raw ints so we can lerp in
+// 8-bit space before packing to RGB565.
+static const uint32_t NEON5[5] = { 0x00e5ff, 0xff2bd6, 0xff3355, 0xff9a3c, 0x35e08a };
+
+// Linear-interpolate the 5-colour neon ramp at t in [0,255] (wrapping) and
+// return an RGB565 value. Used to paint the multi-colour flow gradient.
+static inline uint16_t neon5_lerp565(uint8_t t) {
+    const uint32_t seg = (uint32_t)t * 5u;          // 0..1279
+    const int i = (int)(seg >> 8);                  // 0..4
+    const uint8_t f = (uint8_t)(seg & 0xFF);        // fractional 0..255
+    const uint32_t a = NEON5[i % 5];
+    const uint32_t b = NEON5[(i + 1) % 5];
+    const uint8_t ar = (a >> 16) & 0xFF, ag = (a >> 8) & 0xFF, ab = a & 0xFF;
+    const uint8_t br = (b >> 16) & 0xFF, bg = (b >> 8) & 0xFF, bb = b & 0xFF;
+    const uint8_t r = (uint8_t)(ar + (((int)br - ar) * f) / 255);
+    const uint8_t g = (uint8_t)(ag + (((int)bg - ag) * f) / 255);
+    const uint8_t bl = (uint8_t)(ab + (((int)bb - ab) * f) / 255);
+    return (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (bl >> 3));
+}
+
+// Resolve the two accent colors for the current layout mode.
+//   landscape_small / portrait / large → blue + yellow (Hermes)
+//   landscape_neon_glow               → cyan + magenta
+// (Function bodies live after struct Layout so the parameter type resolves.)
+
 enum layout_mode_t {
     LAYOUT_PORTRAIT_SMALL,
     LAYOUT_LANDSCAPE_SMALL,
+    LAYOUT_LANDSCAPE_NEON_GLOW,  // 013: cyan/magenta neon variant for 320x240 ILI9341
     LAYOUT_PORTRAIT_TALL,
     LAYOUT_LARGE,
 };
@@ -65,6 +108,8 @@ struct Layout {
     int16_t provider_y;
     int16_t bt_x;
     int16_t bt_y;
+    int16_t wifi_x;   // dedicated WiFi glyph, shown when wifi_fallback active
+    int16_t wifi_y;
     int16_t agent_x;
     int16_t agent_y;
     int16_t agent_size;
@@ -120,6 +165,7 @@ struct Layout {
 
 struct PanelWidgets {
     lv_obj_t* root;
+    lv_obj_t* frame;   // 014: gradient-border frame behind the card (neon only)
     lv_obj_t* kicker;
     lv_obj_t* pct;
     lv_obj_t* pill;
@@ -130,10 +176,28 @@ struct PanelWidgets {
     lv_obj_t* meta_right;
 };
 
+// Convenience: only the neon-glow mode triggers the banding-free code paths.
+// Names prefixed `neon_` to dodge LVGL's lv_palette accent_top() symbol.
+static inline bool is_neon_glow(const Layout& l) {
+    return l.mode == LAYOUT_LANDSCAPE_NEON_GLOW;
+}
+
+static inline lv_color_t neon_top(const Layout& l) {
+    return l.mode == LAYOUT_LANDSCAPE_NEON_GLOW ? COL_NEON_CYAN : COL_BLUE;
+}
+
+static inline lv_color_t neon_bottom(const Layout& l) {
+    // 014 Quad-Glow: secondary card shifts to orange (its bar runs orange→green)
+    // so the two cards together span all five neon hues.
+    return l.mode == LAYOUT_LANDSCAPE_NEON_GLOW ? COL_NEON_ORANGE : COL_YELLOW;
+}
+
 static Layout L = {};
 static lv_image_dsc_t battery_dscs[5];
 static uint8_t brand_canvas_buf[54 * 54 * 3];
 static uint16_t ble_canvas_buf[14 * 16];
+static uint16_t wifi_canvas_buf[14 * 16];   // 013: dedicated WiFi glyph, rendered
+                                             // when wifi_fallback is actively connected.
 static uint16_t pair_ble_canvas_buf[26 * 42];
 static uint8_t idle_canvas_buf[20 * 20 * 3];  // RGB565A8: 2 bytes RGB + 1 byte alpha per pixel
 static uint16_t agent_canvas_buf[28 * 28];
@@ -146,6 +210,7 @@ static lv_obj_t* brand_chip_label = nullptr;
 static lv_obj_t* lbl_title = nullptr;
 static lv_obj_t* lbl_provider = nullptr;
 static lv_obj_t* lbl_ble = nullptr;
+static lv_obj_t* lbl_wifi = nullptr;
 static lv_obj_t* agent_badge = nullptr;
 static lv_obj_t* agent_canvas = nullptr;
 static lv_obj_t* battery_img = nullptr;
@@ -197,6 +262,7 @@ static const uint8_t SINE_48[48] = {
 static screen_t current_screen = SCREEN_USAGE;
 static uint32_t s_last_screen_change = 0;
 static bool s_ble_connected = false;
+static wifi_fallback_state_t s_wifi_state = WIFI_FALLBACK_NOT_CONFIGURED;
 static bool data_received = false;
 static int view_state = -1;  // 0 pair, 1 idle, 2 usage
 static int forced_view_override = -1;
@@ -241,8 +307,13 @@ static void compute_layout(const BoardCaps& c) {
     L.scr_w = c.width;
     L.scr_h = c.height;
 
-    if (c.width > c.height) {
-        L.mode = LAYOUT_LANDSCAPE_SMALL;
+    // 013 landscape neon-glow variant: identical geometry to landscape_small
+    // but with banding-free rendering (no solid-fill gradients; sharp neon
+    // borders + box-shadow halos instead). Only opt-in via BoardCaps.
+    const bool use_neon = c.neon_theme && c.width > c.height;
+
+    if (use_neon) {
+        L.mode = LAYOUT_LANDSCAPE_NEON_GLOW;
         L.pad_t = 8;
         L.header_h = 62;
         L.chip_x = 10;
@@ -256,6 +327,8 @@ static void compute_layout(const BoardCaps& c) {
         L.provider_y = 36;
         L.bt_x = 272;
         L.bt_y = 18;
+        L.wifi_x = 252;   // 14x16 glyph 6 px left of BLE
+        L.wifi_y = 18;
         L.agent_size = 24;
         L.agent_x = 290;
         L.agent_y = 14;
@@ -273,8 +346,8 @@ static void compute_layout(const BoardCaps& c) {
         L.card1_y = 76;
         L.card2_y = 158;
         L.card_radius = 12;
-        L.card_pad_l = 12;
-        L.card_pad_r = 12;
+        L.card_pad_l = 10;
+        L.card_pad_r = 10;
         L.card_pad_t = 6;
         L.card_pad_b = 5;
         L.kicker_y = 0;
@@ -298,11 +371,89 @@ static void compute_layout(const BoardCaps& c) {
         L.idle_label_y = -8;
         L.show_kicker = false;
         L.pair_row = true;
-        L.title_font = &font_ui_bold_20;
+        L.title_font = &font_ui_bold_26;
         L.provider_font = &font_ui_bold_10;
         L.chip_font = &font_ui_bold_24;
         L.kicker_font = &font_ui_bold_10;
-        L.metric_font = &font_ui_bold_24;
+        L.metric_font = &font_ui_bold_26;
+        L.pill_font = &font_ui_bold_10;
+        L.meta_font = &font_ui_11;
+        L.pair_font = &font_ui_bold_11;
+        L.idle_font = &font_ui_12;
+        // 014 Quad-Glow: lift the lower card content ~5 px off the bottom so
+        // the %, "Window left" and "reset in" row get breathing room.
+        L.bar_y = 39;
+        L.meta_y = 54;
+        L.card_pad_b = 9;
+        // 014: shorter cards so the 2 px gradient frames don't overlap.
+        L.card_h = 74;
+        return;
+    }
+
+    if (c.width > c.height) {
+        L.mode = LAYOUT_LANDSCAPE_SMALL;
+        L.pad_t = 8;
+        L.header_h = 62;
+        L.chip_x = 10;
+        L.chip_y = 8;
+        L.chip_w = 58;
+        L.chip_h = 56;
+        L.chip_radius = 16;
+        L.title_x = 74;
+        L.title_y = 8;
+        L.title_w = 150;
+        L.provider_y = 36;
+        L.bt_x = 272;
+        L.bt_y = 18;
+        L.wifi_x = 252;
+        L.wifi_y = 18;
+        L.agent_size = 24;
+        L.agent_x = 290;
+        L.agent_y = 14;
+        L.battery_x = 230;
+        L.battery_y = 12;
+        L.flow_x = 10;
+        L.flow_y = 68;
+        L.flow_w = 300;
+        L.flow_h = 2;
+        L.flow_dot = 4;
+        L.card_x = 10;
+        L.card2_x = L.card_x;
+        L.card_w = 300;
+        L.card_h = 78;
+        L.card1_y = 76;
+        L.card2_y = 158;
+        L.card_radius = 12;
+        L.card_pad_l = 10;
+        L.card_pad_r = 10;
+        L.card_pad_t = 6;
+        L.card_pad_b = 5;
+        L.kicker_y = 0;
+        L.pct_y = 10;
+        L.pill_y = 4;
+        L.bar_y = 43;
+        L.bar_h = 9;
+        L.meta_y = 59;
+        L.meta_dot = 6;
+        L.meta_right_w = 82;
+        L.pair_hero_x = 22;
+        L.pair_hero_y = 98;
+        L.pair_hero_size = 90;
+        L.pair_steps_x = 136;
+        L.pair_steps_y = 100;
+        L.pair_step_w = 148;
+        L.pair_step_h = 21;
+        L.pair_step_gap = 6;
+        L.idle_creature_size = 140;
+        L.idle_creature_dy = -6;
+        L.idle_label_y = -8;
+        L.show_kicker = false;
+        L.pair_row = true;
+        L.title_font = &font_ui_bold_26;
+        L.provider_font = &font_ui_bold_10;
+        L.chip_font = &font_ui_bold_24;
+        L.kicker_font = &font_ui_bold_10;
+        L.metric_font = &font_ui_bold_26;
         L.pill_font = &font_ui_bold_10;
         L.meta_font = &font_ui_11;
         L.pair_font = &font_ui_bold_11;
@@ -322,6 +473,8 @@ static void compute_layout(const BoardCaps& c) {
         L.provider_y = 42;
         L.bt_x = 189;
         L.bt_y = 24;
+        L.wifi_x = 169;
+        L.wifi_y = 24;
         L.agent_size = 18;
         L.agent_x = 210;
         L.agent_y = 21;
@@ -364,7 +517,7 @@ static void compute_layout(const BoardCaps& c) {
         L.idle_label_y = -8;
         L.show_kicker = true;
         L.pair_row = false;
-        L.title_font = &font_ui_bold_20;
+        L.title_font = &font_ui_bold_26;
         L.provider_font = &font_ui_bold_12;
         L.chip_font = &font_ui_bold_24;
         L.kicker_font = &font_ui_bold_12;
@@ -388,6 +541,8 @@ static void compute_layout(const BoardCaps& c) {
         L.provider_y = 70;
         L.bt_x = 380;
         L.bt_y = 34;
+        L.wifi_x = 356;
+        L.wifi_y = 34;
         L.agent_size = 28;
         L.agent_x = 414;
         L.agent_y = 30;
@@ -454,6 +609,8 @@ static void compute_layout(const BoardCaps& c) {
         L.provider_y = 60;
         L.bt_x = 296;
         L.bt_y = 30;
+        L.wifi_x = 272;
+        L.wifi_y = 30;
         L.agent_size = 24;
         L.agent_x = 322;
         L.agent_y = 27;
@@ -543,6 +700,12 @@ static uint16_t blend_rgb565(uint16_t bg, uint16_t fg, uint8_t alpha) {
     return make_rgb565(out_r, out_g, out_b);
 }
 
+// 013: card shine (conic-gradient ring) — removed during revert.
+// The rotating overlay triggered lv_img_set_angle every 90 ms which,
+// combined with the other 013 effects, appeared to make BLE unstable
+// on CYD. The static card border + glow animation in ui_tick_anim is
+// still present and preserves most of the sketch 13 feel.
+
 static void draw_square_565(uint16_t* buf, int w, int h, int cx, int cy, int size, uint16_t color) {
     const int r = size / 2;
     for (int y = cy - r; y <= cy + r; ++y) {
@@ -608,7 +771,8 @@ static void render_hermes_header_icon(int mode, uint8_t phase) {
             for (int sy = 0; sy < 20; ++sy) {
                 for (int sx = 0; sx < 20; ++sx) {
                     uint8_t idx = frame[sy * 20 + sx];
-                    // All indices are opaque. Scale 20→54 with exact ranges (no gaps)
+                    if (idx == 0 || idx >= PET_PAL_MAX) continue;
+                    // Scale 20→54 with exact ranges (no gaps).
                     int x0 = (sx * 54) / 20;
                     int x1 = ((sx + 1) * 54) / 20;
                     int y0 = (sy * 54) / 20;
@@ -624,10 +788,13 @@ static void render_hermes_header_icon(int mode, uint8_t phase) {
     }
 
     // ══ Fallback: Hermes logo (existing code below) ══
-    const uint16_t blue = make_rgb565(0x5a, 0x7a, 0xff);
-    const uint16_t yellow = make_rgb565(0xff, 0xd5, 0x3d);
-    const uint16_t body = make_rgb565(0xec, 0xe6, 0xdb);
-    const uint16_t shade = make_rgb565(0xde, 0xda, 0xd0);
+    // Neon variant: cyan/magenta accents instead of blue/yellow — keeps the
+    // body off-white so the icon stays recognizable as Hermes.
+    const bool neon = is_neon_glow(L);
+    const uint16_t blue   = neon ? make_rgb565(0x00, 0xe5, 0xff) : make_rgb565(0x5a, 0x7a, 0xff);
+    const uint16_t yellow = neon ? make_rgb565(0xff, 0x2b, 0xd6) : make_rgb565(0xff, 0xd5, 0x3d);
+    const uint16_t body   = neon ? make_rgb565(0xee, 0xf4, 0xff) : make_rgb565(0xec, 0xe6, 0xdb);
+    const uint16_t shade  = neon ? make_rgb565(0xa8, 0xc0, 0xe0) : make_rgb565(0xde, 0xda, 0xd0);
 
     clear_canvas_565a8(brand_canvas_buf, 54, 54);
 
@@ -654,8 +821,12 @@ static void render_hermes_header_icon(int mode, uint8_t phase) {
         };
         const int a = phase % 12;
         const int b = (a + 6) % 12;
-        draw_square_565a8(brand_canvas_buf, 54, 54, orbit[a][0], orbit[a][1], 5, blue);
-        draw_square_565a8(brand_canvas_buf, 54, 54, orbit[b][0], orbit[b][1], 3, blue);
+        // 014 Quad-Glow: the two orbiting sparks cycle the 5-colour ramp
+        // (opposite spark offset half a turn in hue) for a rainbow orbit.
+        const uint16_t spark_a = neon ? neon5_lerp565((uint8_t)(phase * 21)) : blue;
+        const uint16_t spark_b = neon ? neon5_lerp565((uint8_t)(phase * 21 + 128)) : blue;
+        draw_square_565a8(brand_canvas_buf, 54, 54, orbit[a][0], orbit[a][1], 5, spark_a);
+        draw_square_565a8(brand_canvas_buf, 54, 54, orbit[b][0], orbit[b][1], 3, spark_b);
     }
 
     if (brand_canvas) lv_obj_invalidate(brand_canvas);
@@ -676,9 +847,13 @@ static void render_hermes_idle_icon(uint8_t phase) {
         if (frame) {
             for (int i = 0; i < 400; i++) {
                 uint8_t idx = frame[i];
-                // ALL palette indices are opaque — pet sprite fills 20×20
-                rgb[i] = pet_buffer_palette()[idx];
-                alpha[i] = 255;
+                if (idx == 0 || idx >= PET_PAL_MAX) {
+                    rgb[i] = 0;
+                    alpha[i] = 0;
+                } else {
+                    rgb[i] = pet_buffer_palette()[idx];
+                    alpha[i] = 255;
+                }
             }
             if (idle_canvas) lv_obj_invalidate(idle_canvas);
             return;
@@ -686,9 +861,16 @@ static void render_hermes_idle_icon(uint8_t phase) {
     }
 
     // ── Fallback: Hermes head (existing code, unchanged) ──
+    const bool neon = is_neon_glow(L);
     const uint8_t dim = 190 + (phase < 24 ? phase : 48 - phase);
-    const uint16_t body = make_rgb565((0xec * dim) / 214, (0xe6 * dim) / 214, (0xdb * dim) / 214);
-    const uint16_t shade = make_rgb565((0xde * dim) / 214, (0xda * dim) / 214, (0xd0 * dim) / 214);
+    const uint8_t body_r = neon ? 0xee : 0xec;
+    const uint8_t body_g = neon ? 0xf4 : 0xe6;
+    const uint8_t body_b = neon ? 0xff : 0xdb;
+    const uint8_t shade_r = neon ? 0xa8 : 0xde;
+    const uint8_t shade_g = neon ? 0xc0 : 0xda;
+    const uint8_t shade_b = neon ? 0xe0 : 0xd0;
+    const uint16_t body = make_rgb565((body_r * dim) / 214, (body_g * dim) / 214, (body_b * dim) / 214);
+    const uint16_t shade = make_rgb565((shade_r * dim) / 214, (shade_g * dim) / 214, (shade_b * dim) / 214);
     for (int i = 0; i < 400; i++) {
         char code = HERMES_HEADER_FRAME[i];
         if (code == '0') { rgb[i] = 0; alpha[i] = 0; }
@@ -727,7 +909,9 @@ static void draw_line_thick_565(uint16_t* buf, int w, int h, int x0, int y0, int
 
 static void render_ble_icon(void) {
     const uint16_t bg = make_rgb565(0x05, 0x06, 0x08);
-    const uint16_t blue = make_rgb565(0x5a, 0x7a, 0xff);
+    const uint16_t blue = is_neon_glow(L)
+        ? make_rgb565(0x00, 0xe5, 0xff)
+        : make_rgb565(0x5a, 0x7a, 0xff);
     for (int i = 0; i < 14 * 16; ++i) ble_canvas_buf[i] = bg;
 
     draw_line_thick_565(ble_canvas_buf, 14, 16, 7, 0, 7, 15, blue, 1);
@@ -737,7 +921,9 @@ static void render_ble_icon(void) {
 
 static void render_pair_ble_icon(void) {
     const uint16_t bg = make_rgb565(0x05, 0x06, 0x08);
-    const uint16_t blue = make_rgb565(0x5a, 0x7a, 0xff);
+    const uint16_t blue = is_neon_glow(L)
+        ? make_rgb565(0x00, 0xe5, 0xff)
+        : make_rgb565(0x5a, 0x7a, 0xff);
     for (int i = 0; i < 26 * 42; ++i) pair_ble_canvas_buf[i] = bg;
 
     draw_line_thick_565(pair_ble_canvas_buf, 26, 42, 13, 0, 13, 41, blue, 3);
@@ -784,21 +970,46 @@ static void render_flow_line(uint8_t phase) {
 
     const int w = L.flow_w;
     const int h = L.flow_h;
+    const bool neon = is_neon_glow(L);
     const uint16_t base = make_rgb565(0x1f, 0x24, 0x2c);
     const uint16_t edge = make_rgb565(0x2b, 0x31, 0x3b);
-    const uint16_t glow = make_rgb565(0x72, 0x95, 0xff);
 
     const int radius = (w * 26) / 100;
     const int travel = w + radius * 2;
     const int center = -radius + (int)(((int32_t)travel * phase) / 47);
 
+    if (neon) {
+        // 014 Quad-Glow: the strip is a scrolling five-colour rainbow
+        // (cyan→magenta→red→orange→green). A brighter highlight band rides
+        // along it (moving with `phase`) so the stream reads as flowing.
+        const int denom = w > 1 ? w - 1 : 1;
+        const uint8_t scroll = (uint8_t)(phase * 6);
+        for (int y = 0; y < h; ++y) {
+            for (int x = 0; x < w; ++x) {
+                const uint8_t hue = (uint8_t)(((uint32_t)x * 255u) / denom + scroll);
+                const uint16_t rc = neon5_lerp565(hue);
+                const int dist = abs(x - center);
+                // dim rainbow track everywhere, bright band near the pulse
+                uint8_t a = 120;
+                if (dist < radius) {
+                    const uint32_t t = 255u - (uint32_t)(dist * 255) / (uint32_t)radius;
+                    a = (uint8_t)(120 + (t * 135u) / 255u);  // 120..255
+                }
+                flow_canvas_buf[y * w + x] = blend_rgb565(base, rc, a);
+            }
+        }
+        lv_obj_invalidate(flow_canvas);
+        return;
+    }
+
+    const uint16_t glow = make_rgb565(0x72, 0x95, 0xff);
     for (int y = 0; y < h; ++y) {
         for (int x = 0; x < w; ++x) {
             const int dist = abs(x - center);
             uint16_t color = blend_rgb565(base, edge, 90);
             if (dist < radius) {
                 const uint32_t t = 255u - (uint32_t)(dist * 255) / (uint32_t)radius;
-                const uint8_t a = (uint8_t)((t * t) / 255u);  // softer falloff near the tail
+                uint8_t a = (uint8_t)((t * t) / 255u);  // softer falloff near the tail
                 color = blend_rgb565(color, glow, a);
             }
             flow_canvas_buf[y * w + x] = color;
@@ -845,7 +1056,7 @@ static void format_panel_heading(const UsagePanelData* panel, bool top, char* bu
     if (strcmp(panel->kind, "window_short") == 0) {
         snprintf(buf, buf_size, "Current window");
     } else if (strcmp(panel->kind, "window_long") == 0) {
-        snprintf(buf, buf_size, "Weekly cap");
+        snprintf(buf, buf_size, "%s", strcmp(panel->label, "Monthly") == 0 ? "Monthly cap" : "Weekly cap");
     } else if (strcmp(panel->kind, "budget_daily") == 0) {
         snprintf(buf, buf_size, "Daily budget");
     } else if (strcmp(panel->kind, "wallet_depletion") == 0) {
@@ -864,18 +1075,18 @@ static void format_panel_meta_left(const UsagePanelData* panel, bool top, char* 
     }
 
     if (L.mode == LAYOUT_LANDSCAPE_SMALL && strcmp(panel->kind, "window_short") == 0) {
-        snprintf(buf, buf_size, "left_now");
+        snprintf(buf, buf_size, "now_left");
     } else if (L.mode == LAYOUT_LANDSCAPE_SMALL && strcmp(panel->kind, "window_long") == 0) {
-        snprintf(buf, buf_size, "week_left");
+        snprintf(buf, buf_size, "%s", strcmp(panel->label, "Monthly") == 0 ? "monthly_left" : "week_left");
     } else if (strcmp(panel->kind, "window_short") == 0) {
-        snprintf(buf, buf_size, "window left");
+        snprintf(buf, buf_size, "Window left");
     } else if (strcmp(panel->kind, "window_long") == 0) {
-        snprintf(buf, buf_size, "week left");
+        snprintf(buf, buf_size, "%s", strcmp(panel->label, "Monthly") == 0 ? "Monthly left" : "Week left");
     } else if (strcmp(panel->kind, "budget_daily") == 0) {
-        snprintf(buf, buf_size, "day left");
+        snprintf(buf, buf_size, "Day left");
     } else if (strcmp(panel->kind, "wallet_depletion") == 0) {
         const bool is_prepaid = (strcmp(current_usage.plan_type, "prepaid") == 0);
-        snprintf(buf, buf_size, is_prepaid ? "balance left" : "wallet left");
+        snprintf(buf, buf_size, is_prepaid ? "Balance left" : "Wallet left");
     } else if (panel->kind[0]) {
         snake_to_words(panel->kind, buf, buf_size);
     } else if (panel->label[0]) {
@@ -927,14 +1138,14 @@ static lv_obj_t* make_transparent_box(lv_obj_t* parent, int x, int y, int w, int
 }
 
 static void build_screen_grid(lv_obj_t* parent) {
-    if (L.mode != LAYOUT_LANDSCAPE_SMALL) return;
+    if (L.mode != LAYOUT_LANDSCAPE_SMALL && !is_neon_glow(L)) return;
 
     for (int x = 0; x < L.scr_w; x += 14) {
         lv_obj_t* line = lv_obj_create(parent);
         lv_obj_set_pos(line, x, 0);
         lv_obj_set_size(line, 1, L.scr_h);
         lv_obj_set_style_bg_color(line, lv_color_hex(0xffffff), 0);
-        lv_obj_set_style_bg_opa(line, (lv_opa_t)12, 0);
+        lv_obj_set_style_bg_opa(line, (lv_opa_t)22, 0);
         lv_obj_set_style_border_width(line, 0, 0);
         lv_obj_set_style_pad_all(line, 0, 0);
         lv_obj_clear_flag(line, LV_OBJ_FLAG_SCROLLABLE);
@@ -946,7 +1157,7 @@ static void build_screen_grid(lv_obj_t* parent) {
         lv_obj_set_pos(line, 0, y);
         lv_obj_set_size(line, L.scr_w, 1);
         lv_obj_set_style_bg_color(line, lv_color_hex(0xffffff), 0);
-        lv_obj_set_style_bg_opa(line, (lv_opa_t)12, 0);
+        lv_obj_set_style_bg_opa(line, (lv_opa_t)22, 0);
         lv_obj_set_style_border_width(line, 0, 0);
         lv_obj_set_style_pad_all(line, 0, 0);
         lv_obj_clear_flag(line, LV_OBJ_FLAG_SCROLLABLE);
@@ -956,25 +1167,42 @@ static void build_screen_grid(lv_obj_t* parent) {
 
 static void style_card_shell(lv_obj_t* panel, lv_color_t accent) {
     const bool landscape = L.mode == LAYOUT_LANDSCAPE_SMALL;
-    const bool secondary = lv_color_eq(accent, COL_YELLOW);
-    lv_color_t top = landscape ? lv_color_hex(0x150f24) : COL_PANEL;
-    lv_color_t bottom = landscape ? lv_color_hex(0x0c0a16) : COL_PANEL_ALT;
+    const bool neon = is_neon_glow(L);
+    const bool secondary = lv_color_eq(accent, COL_YELLOW) || lv_color_eq(accent, COL_NEON_MAGENTA);
+    lv_color_t top = landscape ? lv_color_hex(0x313844) : COL_PANEL;
+    lv_color_t bottom = landscape ? lv_color_hex(0x171c24) : COL_PANEL_ALT;
     if (secondary && landscape) {
-        top = lv_color_hex(0x1d1432);
-        bottom = lv_color_hex(0x0d0a1a);
+        top = lv_color_hex(0x343941);
+        bottom = lv_color_hex(0x191d23);
     }
 
     lv_obj_set_style_bg_color(panel, top, 0);
     lv_obj_set_style_bg_opa(panel, LV_OPA_COVER, 0);
-    lv_obj_set_style_bg_grad_color(panel, bottom, 0);
-    lv_obj_set_style_bg_grad_dir(panel, LV_GRAD_DIR_VER, 0);
+    if (neon) {
+        // Neon theme: solid dark panel + 2-stop shadow halo for glow.
+        // No gradient stop here — RGB565 banding on a 78 px card with 2
+        // close colors is visible as horizontal stripes. The glow comes
+        // from the box-shadow ring + sharp 1 px neon border instead.
+        // 014 Quad-Glow: interior is a black→gray vertical gradient. The neon
+        // gradient BORDER is a separate frame object 3 px behind the card
+        // (border-box trick in init_panel_widgets), so the card carries no
+        // border/shadow of its own.
+        lv_obj_set_style_bg_color(panel, lv_color_hex(0x0a0d12), 0);
+        lv_obj_set_style_bg_grad_color(panel, lv_color_hex(0x242a35), 0);
+        lv_obj_set_style_bg_grad_dir(panel, LV_GRAD_DIR_VER, 0);
+        lv_obj_set_style_border_width(panel, 0, 0);
+        lv_obj_set_style_shadow_width(panel, 0, 0);
+    } else {
+        lv_obj_set_style_bg_grad_color(panel, bottom, 0);
+        lv_obj_set_style_bg_grad_dir(panel, LV_GRAD_DIR_VER, 0);
+        lv_obj_set_style_border_width(panel, 1, 0);
+        lv_obj_set_style_border_color(panel, accent, 0);
+        lv_obj_set_style_border_opa(panel, landscape ? (lv_opa_t)108 : LV_OPA_COVER, 0);
+        lv_obj_set_style_shadow_width(panel, landscape ? 18 : 0, 0);
+        lv_obj_set_style_shadow_color(panel, accent, 0);
+        lv_obj_set_style_shadow_opa(panel, landscape ? (lv_opa_t)42 : LV_OPA_TRANSP, 0);
+    }
     lv_obj_set_style_radius(panel, L.card_radius, 0);
-    lv_obj_set_style_border_width(panel, 1, 0);
-    lv_obj_set_style_border_color(panel, accent, 0);
-    lv_obj_set_style_border_opa(panel, landscape ? (lv_opa_t)108 : LV_OPA_COVER, 0);
-    lv_obj_set_style_shadow_width(panel, landscape ? 18 : 0, 0);
-    lv_obj_set_style_shadow_color(panel, accent, 0);
-    lv_obj_set_style_shadow_opa(panel, landscape ? (lv_opa_t)42 : LV_OPA_TRANSP, 0);
     lv_obj_set_style_pad_left(panel, L.card_pad_l, 0);
     lv_obj_set_style_pad_right(panel, L.card_pad_r, 0);
     lv_obj_set_style_pad_top(panel, L.card_pad_t, 0);
@@ -983,27 +1211,38 @@ static void style_card_shell(lv_obj_t* panel, lv_color_t accent) {
 
 static void style_pill(lv_obj_t* pill, lv_color_t accent) {
     lv_obj_set_style_text_font(pill, L.pill_font, 0);
-    const bool secondary = lv_color_eq(accent, COL_YELLOW);
-    // 013 neon glow pills — bright neon text on darker base, glow halo from shadow_color.
-    lv_color_t text = secondary ? lv_color_hex(0xff7ff0) : lv_color_hex(0x7af6ff);
-    lv_color_t bg = secondary ? lv_color_hex(0x1a0c2b) : lv_color_hex(0x0a1226);
+    const bool neon = is_neon_glow(L);
+    const bool secondary = lv_color_eq(accent, COL_YELLOW) || lv_color_eq(accent, COL_NEON_MAGENTA) || lv_color_eq(accent, COL_NEON_ORANGE);
+    // 014: secondary pill is warm (orange→green card), so its text/bg go amber.
+    lv_color_t text = neon
+        ? (secondary ? lv_color_hex(0xffc38a) : COL_NEON_GLOW_HI)
+        : (secondary ? lv_color_hex(0xffe998) : lv_color_hex(0xa8c0ff));
+    lv_color_t bg = neon
+        ? (secondary ? lv_color_hex(0x241a0c) : lv_color_hex(0x062531))
+        : (secondary ? lv_color_hex(0x352f19) : lv_color_hex(0x1d2540));
     lv_obj_set_style_text_color(pill, L.mode == LAYOUT_LANDSCAPE_SMALL ? text : COL_TEXT, 0);
     lv_obj_set_style_bg_color(pill, L.mode == LAYOUT_LANDSCAPE_SMALL ? bg : COL_PANEL_ALT, 0);
     lv_obj_set_style_bg_opa(pill, L.mode == LAYOUT_LANDSCAPE_SMALL ? (lv_opa_t)166 : LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(pill, 1, 0);
     lv_obj_set_style_border_color(pill, accent, 0);
-    lv_obj_set_style_border_opa(pill, L.mode == LAYOUT_LANDSCAPE_SMALL ? (lv_opa_t)140 : LV_OPA_COVER, 0);
-    if (L.mode == LAYOUT_LANDSCAPE_SMALL) {
-        lv_obj_set_style_shadow_width(pill, 8, 0);
-        lv_obj_set_style_shadow_color(pill, accent, 0);
-        lv_obj_set_style_shadow_opa(pill, (lv_opa_t)40, 0);
-    }
+    lv_obj_set_style_border_opa(pill, L.mode == LAYOUT_LANDSCAPE_SMALL ? (lv_opa_t)108 : LV_OPA_COVER, 0);
     lv_obj_set_style_radius(pill, LV_RADIUS_CIRCLE, 0);
-    if (L.mode == LAYOUT_LANDSCAPE_SMALL) {
-        lv_obj_set_style_pad_left(pill, 8, 0);
-        lv_obj_set_style_pad_right(pill, 8, 0);
-        lv_obj_set_style_pad_top(pill, 2, 0);
-        lv_obj_set_style_pad_bottom(pill, 2, 0);
+    if (neon) {
+        // Neon pill: small inner glow halo, no gradient — pills are tiny
+        // (~9 px text) so a gradient stop would alias hard. Padding matches
+        // sketch 13 (4 px 9 px) — tighter than landscape_small's 8/2.
+        lv_obj_set_style_shadow_width(pill, 6, 0);
+        lv_obj_set_style_shadow_color(pill, accent, 0);
+        lv_obj_set_style_shadow_opa(pill, (lv_opa_t)96, 0);
+        lv_obj_set_style_pad_left(pill, 9, 0);
+        lv_obj_set_style_pad_right(pill, 9, 0);
+        lv_obj_set_style_pad_top(pill, 4, 0);
+        lv_obj_set_style_pad_bottom(pill, 4, 0);
+    } else if (L.mode == LAYOUT_LANDSCAPE_SMALL) {
+        lv_obj_set_style_pad_left(pill, 9, 0);
+        lv_obj_set_style_pad_right(pill, 9, 0);
+        lv_obj_set_style_pad_top(pill, 4, 0);
+        lv_obj_set_style_pad_bottom(pill, 4, 0);
     } else {
         lv_obj_set_style_pad_left(pill, 10, 0);
         lv_obj_set_style_pad_right(pill, 10, 0);
@@ -1014,15 +1253,22 @@ static void style_pill(lv_obj_t* pill, lv_color_t accent) {
 
 static lv_obj_t* make_bar(lv_obj_t* parent, int y, lv_color_t accent, lv_obj_t** fill_out) {
     lv_obj_t* bar = lv_obj_create(parent);
-    const bool secondary = lv_color_eq(accent, COL_YELLOW);
-    const lv_color_t fill_start = secondary ? lv_color_hex(0xc41aa3) : lv_color_hex(0x00aacf);
-    const lv_color_t fill_end = secondary ? lv_color_hex(0xff2bd6) : lv_color_hex(0x00e5ff);
+    const bool secondary = lv_color_eq(accent, COL_YELLOW) || lv_color_eq(accent, COL_NEON_MAGENTA) || lv_color_eq(accent, COL_NEON_ORANGE);
+    const bool neon = is_neon_glow(L);
+    // 014 Quad-Glow: two-tone gradient fills — primary cyan→magenta,
+    // secondary orange→green. Together the two bars span all five hues.
+    const lv_color_t fill_start = neon
+        ? (secondary ? COL_NEON_ORANGE : COL_NEON_CYAN)
+        : (secondary ? lv_color_hex(0xd0a12b) : lv_color_hex(0x3658cb));
+    const lv_color_t fill_end = neon
+        ? (secondary ? COL_NEON_GREEN : COL_NEON_MAGENTA)
+        : (secondary ? lv_color_hex(0xf4dc86) : lv_color_hex(0x7e9fff));
     lv_obj_set_pos(bar, 0, y);
     lv_obj_set_size(bar, L.card_w - L.card_pad_l - L.card_pad_r, L.bar_h);
-    lv_obj_set_style_bg_color(bar, COL_TRACK, 0);
+    lv_obj_set_style_bg_color(bar, neon ? COL_NEON_TRACK : COL_TRACK, 0);
     lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(bar, 1, 0);
-    lv_obj_set_style_border_color(bar, THEME_PANEL_EDGE, 0);
+    lv_obj_set_style_border_color(bar, neon ? lv_color_hex(0x2b313b) : lv_color_hex(0x434955), 0);
     lv_obj_set_style_border_opa(bar, (lv_opa_t)80, 0);
     lv_obj_set_style_radius(bar, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_pad_all(bar, 0, 0);
@@ -1036,12 +1282,17 @@ static lv_obj_t* make_bar(lv_obj_t* parent, int y, lv_color_t accent, lv_obj_t**
     lv_obj_set_style_bg_color(fill, fill_start, 0);
     lv_obj_set_style_bg_opa(fill, LV_OPA_COVER, 0);
     lv_obj_set_style_bg_grad_color(fill, fill_end, 0);
+    // 014 Quad-Glow: the design is gradient-forward, so run a real
+    // horizontal 2-stop gradient across the fill in neon mode too. Minor
+    // RGB565 stepping on the 9 px bar is acceptable for the neon look and
+    // is masked by the accent glow shadow.
     lv_obj_set_style_bg_grad_dir(fill, LV_GRAD_DIR_HOR, 0);
     lv_obj_set_style_border_width(fill, 0, 0);
     lv_obj_set_style_radius(fill, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_shadow_width(fill, 8, 0);
+    lv_obj_set_style_shadow_width(fill, neon ? 10 : 8, 0);
     lv_obj_set_style_shadow_color(fill, accent, 0);
-    lv_obj_set_style_shadow_opa(fill, secondary ? (lv_opa_t)34 : (lv_opa_t)44, 0);
+    lv_obj_set_style_shadow_opa(fill, neon ? (lv_opa_t)96 : (secondary ? (lv_opa_t)34 : (lv_opa_t)44), 0);
+    if (neon) lv_obj_set_style_shadow_spread(fill, 1, 0);
     lv_obj_clear_flag(fill, LV_OBJ_FLAG_SCROLLABLE);
     if (fill_out) *fill_out = fill;
     return bar;
@@ -1050,6 +1301,33 @@ static lv_obj_t* make_bar(lv_obj_t* parent, int y, lv_color_t accent, lv_obj_t**
 static void init_panel_widgets(PanelWidgets* widgets, lv_obj_t* parent, int x, int y, lv_color_t accent) {
     const int meta_label_y = L.meta_y - (L.mode == LAYOUT_LANDSCAPE_SMALL ? 2 : 0);
     const int meta_dot_y = L.meta_y + (L.mode == LAYOUT_LANDSCAPE_SMALL ? 1 : 2);
+
+    // 014 Quad-Glow: gradient-border frame. LVGL can't gradient a border, so a
+    // frame object sits 3 px behind the card and its 3 px margin shows as a
+    // real colour-gradient ring (cyan→magenta primary, orange→green secondary).
+    widgets->frame = nullptr;
+    if (is_neon_glow(L)) {
+        const bool secondary = lv_color_eq(accent, COL_NEON_ORANGE);
+        const lv_color_t g0 = secondary ? COL_NEON_ORANGE : COL_NEON_CYAN;
+        const lv_color_t g1 = secondary ? COL_NEON_GREEN  : COL_NEON_MAGENTA;
+        lv_obj_t* frame = lv_obj_create(parent);
+        lv_obj_set_pos(frame, x - 2, y - 2);
+        lv_obj_set_size(frame, L.card_w + 4, L.card_h + 4);
+        lv_obj_set_style_bg_color(frame, g0, 0);
+        lv_obj_set_style_bg_grad_color(frame, g1, 0);
+        lv_obj_set_style_bg_grad_dir(frame, LV_GRAD_DIR_HOR, 0);
+        lv_obj_set_style_bg_opa(frame, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(frame, 0, 0);
+        lv_obj_set_style_radius(frame, L.card_radius + 1, 0);
+        lv_obj_set_style_pad_all(frame, 0, 0);
+        lv_obj_set_style_shadow_width(frame, 18, 0);
+        lv_obj_set_style_shadow_color(frame, g0, 0);
+        lv_obj_set_style_shadow_opa(frame, (lv_opa_t)90, 0);
+        lv_obj_set_style_shadow_spread(frame, 1, 0);
+        lv_obj_clear_flag(frame, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_flag(frame, LV_OBJ_FLAG_EVENT_BUBBLE);
+        widgets->frame = frame;
+    }
 
     widgets->root = lv_obj_create(parent);
     lv_obj_set_pos(widgets->root, x, y);
@@ -1067,10 +1345,6 @@ static void init_panel_widgets(PanelWidgets* widgets, lv_obj_t* parent, int x, i
     widgets->pct = lv_label_create(widgets->root);
     lv_obj_set_style_text_font(widgets->pct, L.metric_font, 0);
     lv_obj_set_style_text_color(widgets->pct, COL_TEXT, 0);
-    // 013 neon glow halo on the big % number — shadow_color = accent (cyan or magenta)
-    lv_obj_set_style_shadow_width(widgets->pct, 10, 0);
-    lv_obj_set_style_shadow_color(widgets->pct, accent, 0);
-    lv_obj_set_style_shadow_opa(widgets->pct, (lv_opa_t)32, 0);
     lv_obj_set_pos(widgets->pct, 0, L.pct_y);
 
     widgets->pill = lv_label_create(widgets->root);
@@ -1133,16 +1407,22 @@ static void set_usage_panel(PanelWidgets* widgets, const UsagePanelData* panel, 
         lv_label_set_text(widgets->pct, panel->subtext[0] ? panel->subtext : "---");
         lv_label_set_text(widgets->pill, panel->label[0] ? panel->label : default_pill_text(top));
     } else {
-        lv_label_set_text_fmt(widgets->pct, "%d%%", pct);
+        char pct_str[16];
+        snprintf(pct_str, sizeof(pct_str), "%d%%", pct);
+        lv_label_set_text(widgets->pct, pct_str);
         lv_label_set_text(widgets->pill, panel->label[0] ? panel->label : default_pill_text(top));
     }
 
     // ── bar: remaining % for wallet_depletion, spent% for budget_daily ──
     int bar_pct = pct;
     // Prepaid raw-dollar cards: scale bar relative to configured budget
-    if (prepaid_card && pct > 0) {
+    if (prepaid_card && panel->pct > 0.0f) {
         float budget = current_usage.budget > 0 ? current_usage.budget : 20.0f;
-        bar_pct = pct >= budget ? 100 : (int)((pct / budget) * 100.0f);
+        // Keep the raw amount here. Rounding to whole currency units made a
+        // low-balance wallet appear frozen until it crossed the next dollar.
+        bar_pct = panel->pct >= budget
+            ? 100
+            : (int)((panel->pct / budget) * 100.0f + 0.5f);
         if (bar_pct > 100) bar_pct = 100;
     }
 
@@ -1166,6 +1446,37 @@ static void set_usage_panel(PanelWidgets* widgets, const UsagePanelData* panel, 
     lv_label_set_text(widgets->meta_right, meta_right);
 }
 
+static void render_wifi_icon(wifi_fallback_state_t state) {
+    const uint16_t bg = make_rgb565(0x05, 0x06, 0x08);
+    // State -> glyph colour. STANDBY (credentials in NVS, link not yet up)
+    // uses a muted cyan so the icon stays visible after Wi-Fi is configured
+    // but before the first successful poll completes.
+    //   STANDBY    → muted cyan    (configured, waiting for first link)
+    //   CONNECTING → orange         (poll in progress)
+    //   CONNECTED  → green          (live data on Wi-Fi)
+    //   ERROR      → red            (auth/connect failure)
+    const uint16_t color =
+        state == WIFI_FALLBACK_CONNECTED  ? make_rgb565(0x34, 0xb5, 0x5a) :
+        state == WIFI_FALLBACK_CONNECTING ? make_rgb565(0xff, 0xaa, 0x4d) :
+        state == WIFI_FALLBACK_ERROR      ? make_rgb565(0xff, 0x6b, 0x57) :
+        state == WIFI_FALLBACK_STANDBY    ? make_rgb565(0x6a, 0xc4, 0xd8) :
+                                            make_rgb565(0x6a, 0xc4, 0xd8); // NOT_CONFIGURED fallback (also muted)
+    // Render into the dedicated WiFi canvas so it can sit next to the BLE
+    // glyph rather than overwriting it. update_header_connection_state()
+    // toggles lbl_wifi's visibility based on whether wifi is active.
+    for (int i = 0; i < 14 * 16; ++i) wifi_canvas_buf[i] = bg;
+
+    // Compact 14x16 Wi-Fi glyph: two signal chevrons plus the station dot.
+    draw_line_thick_565(wifi_canvas_buf, 14, 16, 1, 5, 4, 2, color, 1);
+    draw_line_thick_565(wifi_canvas_buf, 14, 16, 4, 2, 7, 1, color, 1);
+    draw_line_thick_565(wifi_canvas_buf, 14, 16, 7, 1, 10, 2, color, 1);
+    draw_line_thick_565(wifi_canvas_buf, 14, 16, 10, 2, 13, 5, color, 1);
+    draw_line_thick_565(wifi_canvas_buf, 14, 16, 4, 8, 7, 6, color, 1);
+    draw_line_thick_565(wifi_canvas_buf, 14, 16, 7, 6, 10, 8, color, 1);
+    draw_rect_565(wifi_canvas_buf, 14, 16, 6, 12, 3, 3, color);
+    if (lbl_wifi) lv_obj_invalidate(lbl_wifi);
+}
+
 static void set_single_weekly_limit_layout(bool enabled) {
     if (!panel_top.root || !panel_bottom.root) return;
 
@@ -1175,10 +1486,13 @@ static void set_single_weekly_limit_layout(bool enabled) {
         ? L.card1_y + (L.card2_y - L.card1_y) / 2
         : L.card1_y;
     lv_obj_set_pos(panel_top.root, L.card_x, top_y);
+    if (panel_top.frame) lv_obj_set_pos(panel_top.frame, L.card_x - 2, top_y - 2);
     if (enabled) {
         lv_obj_add_flag(panel_bottom.root, LV_OBJ_FLAG_HIDDEN);
+        if (panel_bottom.frame) lv_obj_add_flag(panel_bottom.frame, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_clear_flag(panel_bottom.root, LV_OBJ_FLAG_HIDDEN);
+        if (panel_bottom.frame) lv_obj_clear_flag(panel_bottom.frame, LV_OBJ_FLAG_HIDDEN);
     }
 }
 
@@ -1187,17 +1501,18 @@ static void set_idle_label_text(bool with_cursor) {
 }
 
 static void style_pair_step(lv_obj_t* step, int state) {
-    lv_color_t border = state == 1 ? COL_BLUE : (state == 2 ? COL_GREEN : COL_PANEL_EDGE);
-    lv_color_t fill = state == 1 ? COL_PANEL_ALT : COL_PANEL_ALT;
+    const bool neon = is_neon_glow(L);
+    lv_color_t border = state == 1 ? neon_top(L) : (state == 2 ? COL_GREEN : COL_PANEL_EDGE);
+    lv_color_t fill = state == 1 ? lv_color_hex(0x1b2640) : COL_PANEL_ALT;
     lv_color_t text = state == 1 ? COL_TEXT : (state == 2 ? COL_TEXT : COL_DIM);
-    if (L.mode == LAYOUT_LANDSCAPE_SMALL) {
-        border = state == 1 ? COL_BLUE : COL_PANEL_EDGE;
-        fill = state == 1 ? COL_PANEL_ALT : COL_BG;
-        text = state == 1 ? COL_TEXT : (state == 2 ? COL_BLUE : COL_DIM);
+    if (L.mode == LAYOUT_LANDSCAPE_SMALL || neon) {
+        border = state == 1 ? neon_top(L) : lv_color_hex(0x3a3c40);
+        fill = state == 1 ? (neon ? lv_color_hex(0x062531) : lv_color_hex(0x1a2440)) : COL_BG;
+        text = state == 1 ? COL_TEXT : (state == 2 ? neon_top(L) : COL_DIM);
     }
     lv_obj_set_style_bg_color(step, fill, 0);
-    lv_obj_set_style_bg_opa(step, state == 1 ? LV_OPA_COVER : (L.mode == LAYOUT_LANDSCAPE_SMALL ? LV_OPA_TRANSP : LV_OPA_COVER), 0);
-    lv_obj_set_style_border_width(step, L.mode == LAYOUT_LANDSCAPE_SMALL ? 0 : 1, 0);
+    lv_obj_set_style_bg_opa(step, state == 1 ? LV_OPA_COVER : ((L.mode == LAYOUT_LANDSCAPE_SMALL || neon) ? LV_OPA_TRANSP : LV_OPA_COVER), 0);
+    lv_obj_set_style_border_width(step, (L.mode == LAYOUT_LANDSCAPE_SMALL || neon) ? 0 : 1, 0);
     lv_obj_set_style_border_color(step, border, 0);
     lv_obj_set_style_text_color(step, text, 0);
 }
@@ -1236,7 +1551,11 @@ static void build_pair_group(lv_obj_t* parent) {
         lv_obj_set_size(pair_scan_rings[i], pair_scan_base, pair_scan_base);
         lv_obj_set_style_bg_opa(pair_scan_rings[i], LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(pair_scan_rings[i], 2, 0);
-        lv_obj_set_style_border_color(pair_scan_rings[i], COL_BLUE, 0);
+        // 014 Quad-Glow: three rings ripple in cyan / magenta / green.
+        const lv_color_t ring_col = is_neon_glow(L)
+            ? (i == 0 ? COL_NEON_CYAN : i == 1 ? COL_NEON_MAGENTA : COL_NEON_GREEN)
+            : neon_top(L);
+        lv_obj_set_style_border_color(pair_scan_rings[i], ring_col, 0);
         lv_obj_set_style_border_opa(pair_scan_rings[i], (lv_opa_t)140, 0);
         lv_obj_set_style_radius(pair_scan_rings[i], LV_RADIUS_CIRCLE, 0);
         lv_obj_set_style_pad_all(pair_scan_rings[i], 0, 0);
@@ -1273,14 +1592,15 @@ static void build_idle_group(lv_obj_t* parent) {
     idle_glow_w = L.idle_creature_size + 20;
     idle_glow_h = L.idle_creature_size + 32;
     lv_obj_set_size(idle_glow_obj, idle_glow_w, idle_glow_h);
-    lv_obj_set_style_bg_color(idle_glow_obj, COL_BLUE, 0);
+    lv_obj_set_style_bg_color(idle_glow_obj, neon_top(L), 0);
     lv_obj_set_style_bg_opa(idle_glow_obj, (lv_opa_t)10, 0);
     lv_obj_set_style_border_width(idle_glow_obj, 1, 0);
-    lv_obj_set_style_border_color(idle_glow_obj, COL_BLUE, 0);
+    lv_obj_set_style_border_color(idle_glow_obj, neon_top(L), 0);
     lv_obj_set_style_border_opa(idle_glow_obj, (lv_opa_t)15, 0);
-    lv_obj_set_style_shadow_width(idle_glow_obj, 18, 0);
-    lv_obj_set_style_shadow_color(idle_glow_obj, COL_BLUE, 0);
-    lv_obj_set_style_shadow_opa(idle_glow_obj, (lv_opa_t)10, 0);
+    lv_obj_set_style_shadow_width(idle_glow_obj, is_neon_glow(L) ? 26 : 18, 0);
+    lv_obj_set_style_shadow_color(idle_glow_obj, neon_top(L), 0);
+    lv_obj_set_style_shadow_opa(idle_glow_obj, is_neon_glow(L) ? (lv_opa_t)110 : (lv_opa_t)10, 0);
+    if (is_neon_glow(L)) lv_obj_set_style_shadow_spread(idle_glow_obj, 2, 0);
     lv_obj_set_style_radius(idle_glow_obj, 20, 0);
     lv_obj_clear_flag(idle_glow_obj, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_align(idle_glow_obj, LV_ALIGN_CENTER, 0, L.idle_creature_dy);
@@ -1301,7 +1621,7 @@ static void build_idle_group(lv_obj_t* parent) {
         idle_z_labels[i] = lv_label_create(idle_group);
         lv_label_set_text(idle_z_labels[i], "Z");
         lv_obj_set_style_text_font(idle_z_labels[i], &font_ui_bold_12, 0);
-        lv_obj_set_style_text_color(idle_z_labels[i], COL_BLUE, 0);
+        lv_obj_set_style_text_color(idle_z_labels[i], neon_top(L), 0);
         lv_obj_set_style_opa(idle_z_labels[i], LV_OPA_50, 0);
         lv_obj_align(idle_z_labels[i], LV_ALIGN_CENTER, -54 + i * 18, -70);
     }
@@ -1320,8 +1640,30 @@ static void update_header_provider(void) {
 }
 
 static void update_header_connection_state(void) {
-    const bool connected = s_ble_connected;
-    lv_obj_set_style_border_color(brand_chip, COL_BLUE, 0);
+    const bool wifi_connected = s_wifi_state == WIFI_FALLBACK_CONNECTED;
+    const bool connected = s_ble_connected || wifi_connected;
+    // STANDBY means credentials are in NVS but the link isn't up yet — the
+    // board is still actively using Wi-Fi as a transport, so the icon stays
+    // visible (greyed-out) rather than vanishing. Without this, configuring
+    // Wi-Fi from the tray would silently hide the indicator until the first
+    // successful poll.
+    const bool wifi_is_active = s_wifi_state == WIFI_FALLBACK_STANDBY
+        || s_wifi_state == WIFI_FALLBACK_CONNECTING
+        || s_wifi_state == WIFI_FALLBACK_CONNECTED
+        || s_wifi_state == WIFI_FALLBACK_ERROR;
+    // A bonded Windows HID link can remain connected after the daemon stops.
+    // Prefer the Wi-Fi glyph whenever fallback is actively trying/working so
+    // the icon describes the data path, not merely the radio link.
+    // 013 neon-glow: both icons now coexist in the header. WiFi sits left of
+    // BLE (per L.wifi_x/wifi_y) and stays hidden when WiFi isn't active.
+    if (wifi_is_active) {
+        render_wifi_icon(s_wifi_state);
+        if (lbl_wifi) lv_obj_clear_flag(lbl_wifi, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        if (lbl_wifi) lv_obj_add_flag(lbl_wifi, LV_OBJ_FLAG_HIDDEN);
+    }
+    render_ble_icon();
+    lv_obj_set_style_border_color(brand_chip, neon_top(L), 0);
     lv_obj_set_style_text_color(brand_chip_label, connected ? COL_TEXT : COL_DIM, 0);
     lv_obj_set_style_opa(lbl_ble, connected ? (lv_opa_t)179 : LV_OPA_COVER, 0);
     lv_obj_set_style_bg_color(agent_badge, connected ? COL_GREEN : COL_ORANGE, 0);
@@ -1330,21 +1672,28 @@ static void update_header_connection_state(void) {
     lv_obj_set_style_border_opa(agent_badge, connected ? (lv_opa_t)74 : (lv_opa_t)84, 0);
     render_agent_badge_icon(connected);
     if (flow_dot) {
-        lv_obj_set_style_bg_color(flow_dot, COL_BLUE, 0);
-        lv_obj_set_style_shadow_width(flow_dot, 4, 0);
-        lv_obj_set_style_shadow_color(flow_dot, COL_BLUE, 0);
-        lv_obj_set_style_shadow_opa(flow_dot, (lv_opa_t)38, 0);
+        lv_obj_set_style_bg_color(flow_dot, neon_top(L), 0);
+        lv_obj_set_style_shadow_width(flow_dot, is_neon_glow(L) ? 8 : 4, 0);
+        lv_obj_set_style_shadow_color(flow_dot, neon_top(L), 0);
+        lv_obj_set_style_shadow_opa(flow_dot, is_neon_glow(L) ? (lv_opa_t)120 : (lv_opa_t)38, 0);
+        if (is_neon_glow(L)) lv_obj_set_style_shadow_spread(flow_dot, 1, 0);
     }
 }
 
 static void update_header_title_for_view(int view) {
     if (!lbl_title) return;
     if (view == 0) {
-        lv_label_set_text(lbl_title, "Pairing");
+        if (!s_ble_connected && s_wifi_state == WIFI_FALLBACK_CONNECTING) {
+            lv_label_set_text(lbl_title, "Wi-Fi...");
+        } else if (!s_ble_connected && s_wifi_state == WIFI_FALLBACK_ERROR) {
+            lv_label_set_text(lbl_title, "Wi-Fi error");
+        } else {
+            lv_label_set_text(lbl_title, "Pairing");
+        }
     } else if (view == 1) {
         lv_label_set_text(lbl_title, "Standing by");
     } else {
-        lv_label_set_text(lbl_title, "Usage");
+        lv_label_set_text(lbl_title, "Remaining");
     }
 }
 
@@ -1393,8 +1742,10 @@ static void apply_view_state(int view) {
 static void update_view_state(void) {
     if (current_screen != SCREEN_USAGE) return;
     const uint32_t now = lv_tick_get();
+    const bool wifi_connected = s_wifi_state == WIFI_FALLBACK_CONNECTED;
+    const bool transport_connected = s_ble_connected || wifi_connected;
     int next = 0;
-    if (!s_ble_connected) {
+    if (!transport_connected) {
         next = 0;  // Pair
     } else if (data_received && (now - last_data_ms) < DATA_FRESH_MS) {
         next = 2;  // Usage — data is fresh
@@ -1402,7 +1753,7 @@ static void update_view_state(void) {
         next = 1;  // Idle — data stale or never received
     }
 
-    if (!s_ble_connected) {
+    if (!transport_connected) {
         forced_view_override = -1;
     } else if (forced_view_override >= 0) {
         next = forced_view_override;
@@ -1432,6 +1783,12 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(usage_container, global_click_cb, LV_EVENT_CLICKED, nullptr);
 
+    // 013: screen grid (14×14 + cyan glow) was removed during revert —
+    // heap_caps_malloc for the screen-sized bitmap plus its static lv_image
+    // descriptor appeared to destabilise BLE on CYD. The static card
+    // border + glow animation in ui_tick_anim still provides the
+    // sketch 13 "alive" feel without touching BLE timing.
+
     usage_bg_glow = lv_obj_create(usage_container);
     lv_obj_set_size(usage_bg_glow, L.scr_w - 38, 92);
     lv_obj_align(usage_bg_glow, LV_ALIGN_TOP_MID, 0, -28);
@@ -1440,12 +1797,21 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_set_style_border_width(usage_bg_glow, 0, 0);
     lv_obj_set_style_radius(usage_bg_glow, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_shadow_width(usage_bg_glow, 44, 0);
-    lv_obj_set_style_shadow_color(usage_bg_glow, COL_BLUE, 0);
+    lv_obj_set_style_shadow_color(usage_bg_glow, neon_top(L), 0);
     lv_obj_set_style_shadow_opa(usage_bg_glow, (lv_opa_t)12, 0);
     lv_obj_clear_flag(usage_bg_glow, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_move_background(usage_bg_glow);
+    // On the 320x240 landscape target, composing this large translucent
+    // shadow underneath the translucent header can exhaust LVGL's software
+    // draw workspace and lock the partial renderer after its first strip.
+    // It is purely decorative; the cards retain their smaller accent shadows.
+    if (L.mode == LAYOUT_LANDSCAPE_SMALL || is_neon_glow(L)) {
+        lv_obj_add_flag(usage_bg_glow, LV_OBJ_FLAG_HIDDEN);
+    }
 
-    // build_screen_grid(usage_container);  // removed
+    // 014 Quad-Glow: 14x14 faint grid restored (safe here — the S3 has PSRAM
+    // + dual core, unlike the CYD where it was reverted for BLE headroom).
+    build_screen_grid(usage_container);
 
     header_group = make_transparent_box(usage_container, 0, 0, L.scr_w, L.header_h + L.pad_t);
 
@@ -1454,8 +1820,8 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_set_size(brand_chip, L.chip_w, L.chip_h);
     lv_obj_set_style_bg_color(brand_chip, COL_PANEL_ALT, 0);
     lv_obj_set_style_bg_opa(brand_chip, L.mode == LAYOUT_LANDSCAPE_SMALL ? LV_OPA_TRANSP : LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(brand_chip, L.mode == LAYOUT_LANDSCAPE_SMALL ? 0 : 1, 0);
-    lv_obj_set_style_border_color(brand_chip, COL_BLUE, 0);
+    lv_obj_set_style_border_width(brand_chip, (L.mode == LAYOUT_LANDSCAPE_SMALL || is_neon_glow(L)) ? 0 : 1, 0);
+    lv_obj_set_style_border_color(brand_chip, neon_top(L), 0);
     lv_obj_set_style_border_opa(brand_chip, L.mode == LAYOUT_LANDSCAPE_SMALL ? LV_OPA_TRANSP : LV_OPA_COVER, 0);
     lv_obj_set_style_radius(brand_chip, L.chip_radius, 0);
     lv_obj_set_style_pad_all(brand_chip, 0, 0);
@@ -1473,27 +1839,42 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_add_flag(brand_chip_label, LV_OBJ_FLAG_HIDDEN);
 
     lbl_title = lv_label_create(header_group);
-    lv_label_set_text(lbl_title, "Usage");
+    lv_label_set_text(lbl_title, "Remaining");
     lv_obj_set_width(lbl_title, L.title_w);
     lv_obj_set_style_text_font(lbl_title, L.title_font, 0);
-    lv_obj_set_style_text_color(lbl_title, lv_color_hex(0xf7f3ea), 0);
+    // 014 Quad-Glow: the title is a neon cyan (the sketch runs a gradient
+    // sweep; a solid cyan is the closest single-colour LVGL label match).
+    lv_obj_set_style_text_color(lbl_title, is_neon_glow(L) ? COL_NEON_CYAN : lv_color_hex(0xf7f3ea), 0);
     lv_obj_set_pos(lbl_title, L.title_x, L.title_y);
 
     lbl_provider = lv_label_create(header_group);
     lv_label_set_text(lbl_provider, "Not found");
     lv_obj_set_style_text_font(lbl_provider, L.provider_font, 0);
-    lv_obj_set_style_text_color(lbl_provider, lv_color_hex(0xcfc8b8), 0);
+    // 014 Quad-Glow: the provider badge must be a faint dark chip (like the
+    // sketch's rgba(255,255,255,.03) pill), NOT a solid white box — the neon
+    // branch previously used LV_OPA_COVER white, which hid the label text.
+    const bool prov_faint = (L.mode == LAYOUT_LANDSCAPE_SMALL || is_neon_glow(L));
+    lv_obj_set_style_text_color(lbl_provider, is_neon_glow(L) ? lv_color_hex(0x9aa4b5) : lv_color_hex(0xcfc8b8), 0);
     lv_obj_set_style_bg_color(lbl_provider, lv_color_hex(0xffffff), 0);
-    lv_obj_set_style_bg_opa(lbl_provider, L.mode == LAYOUT_LANDSCAPE_SMALL ? (lv_opa_t)10 : LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_opa(lbl_provider, prov_faint ? (lv_opa_t)10 : LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(lbl_provider, 1, 0);
     lv_obj_set_style_border_color(lbl_provider, lv_color_hex(0xffffff), 0);
-    lv_obj_set_style_border_opa(lbl_provider, L.mode == LAYOUT_LANDSCAPE_SMALL ? (lv_opa_t)26 : LV_OPA_COVER, 0);
+    lv_obj_set_style_border_opa(lbl_provider, prov_faint ? (lv_opa_t)26 : LV_OPA_COVER, 0);
     lv_obj_set_style_radius(lbl_provider, 3, 0);
-    lv_obj_set_style_pad_left(lbl_provider, L.mode == LAYOUT_LANDSCAPE_SMALL ? 4 : 1, 0);
-    lv_obj_set_style_pad_right(lbl_provider, L.mode == LAYOUT_LANDSCAPE_SMALL ? 4 : 5, 0);
+    lv_obj_set_style_pad_left(lbl_provider, prov_faint ? 4 : 1, 0);
+    lv_obj_set_style_pad_right(lbl_provider, prov_faint ? 4 : 5, 0);
     lv_obj_set_style_pad_top(lbl_provider, 1, 0);
     lv_obj_set_style_pad_bottom(lbl_provider, 1, 0);
     lv_obj_set_pos(lbl_provider, L.title_x, L.provider_y);
+
+    lbl_wifi = lv_canvas_create(header_group);
+    lv_canvas_set_buffer(lbl_wifi, wifi_canvas_buf, 14, 16, LV_COLOR_FORMAT_RGB565);
+    lv_obj_set_style_bg_opa(lbl_wifi, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(lbl_wifi, 0, 0);
+    lv_obj_set_pos(lbl_wifi, L.wifi_x, L.wifi_y);
+    // Hidden by default — update_header_connection_state() shows it only
+    // when wifi_fallback is actively trying/working.
+    lv_obj_add_flag(lbl_wifi, LV_OBJ_FLAG_HIDDEN);
 
     lbl_ble = lv_canvas_create(header_group);
     lv_canvas_set_buffer(lbl_ble, ble_canvas_buf, 14, 16, LV_COLOR_FORMAT_RGB565);
@@ -1548,16 +1929,22 @@ static void init_usage_screen(lv_obj_t* scr) {
 
     flow_dot = lv_obj_create(usage_container);
     lv_obj_set_size(flow_dot, L.flow_dot, L.flow_dot);
-    lv_obj_set_style_bg_color(flow_dot, COL_BLUE, 0);
+    lv_obj_set_style_bg_color(flow_dot, neon_top(L), 0);
     lv_obj_set_style_bg_opa(flow_dot, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(flow_dot, 0, 0);
     lv_obj_set_style_radius(flow_dot, LV_RADIUS_CIRCLE, 0);
+    // Neon glow halo on the flow dot — carries the perceived gradient so
+    // the strip itself can stay sharp (3 alpha stops, no banding).
+    lv_obj_set_style_shadow_width(flow_dot, is_neon_glow(L) ? 8 : 4, 0);
+    lv_obj_set_style_shadow_color(flow_dot, neon_top(L), 0);
+    lv_obj_set_style_shadow_opa(flow_dot, is_neon_glow(L) ? (lv_opa_t)120 : (lv_opa_t)38, 0);
+    if (is_neon_glow(L)) lv_obj_set_style_shadow_spread(flow_dot, 1, 0);
     lv_obj_set_pos(flow_dot, L.flow_x + L.flow_w, L.flow_y - 1);
     lv_obj_clear_flag(flow_dot, LV_OBJ_FLAG_SCROLLABLE);
 
     usage_group = make_transparent_box(usage_container, 0, 0, L.scr_w, L.scr_h);
-    init_panel_widgets(&panel_top, usage_group, L.card_x, L.card1_y, COL_BLUE);
-    init_panel_widgets(&panel_bottom, usage_group, L.card2_x, L.card2_y, COL_YELLOW);
+    init_panel_widgets(&panel_top, usage_group, L.card_x, L.card1_y, neon_top(L));
+    init_panel_widgets(&panel_bottom, usage_group, L.card2_x, L.card2_y, neon_bottom(L));
     set_usage_panel(&panel_top, nullptr, true);
     set_usage_panel(&panel_bottom, nullptr, false);
 
@@ -1574,6 +1961,7 @@ void ui_init(void) {
     render_hermes_header_icon(0, 0);
     render_hermes_idle_icon(0);
     render_ble_icon();
+    render_wifi_icon(WIFI_FALLBACK_NOT_CONFIGURED);  // 013: pre-render with neutral color so lbl_wifi shows pixels on first wifi tick.
     render_pair_ble_icon();
 
     lv_obj_t* scr = lv_scr_act();
@@ -1600,13 +1988,6 @@ void ui_update(const UsageData* data) {
     set_single_weekly_limit_layout(single_weekly_limit);
     set_usage_panel(&panel_top, &data->top, true);
     set_usage_panel(&panel_bottom, &data->bottom, false);
-
-    // Auto-return from splash when BLE data comes back
-    // (skip if user-selected petdex is shown — keep full-screen pet)
-    if (current_screen == SCREEN_SPLASH && data->valid && !pet_buffer_ready()) {
-        ui_show_screen(SCREEN_USAGE);
-        return;
-    }
 
     update_view_state();
 }
@@ -1652,13 +2033,27 @@ void ui_tick_anim(void) {
         card_glow_phase = (uint8_t)((card_glow_phase + 1) % 48);
         const uint32_t s_top = SINE_48[card_glow_phase];
         const uint32_t s_bottom = SINE_48[(card_glow_phase + 12) % 48];
-        if (panel_top.root) {
-            lv_obj_set_style_shadow_opa(panel_top.root, (lv_opa_t)(18 + (24 * s_top) / 255), 0);
-            lv_obj_set_style_border_opa(panel_top.root, (lv_opa_t)(24 + (24 * s_top) / 255), 0);
+        // Original card-glow animation (pre-sketch 13 spec). Reverted from
+        // the 0.10→0.22 / 0.06→0.12 sketch-13 tuned values because the user
+        // reported BLE stopped connecting on CYD with the 013 effects
+        // stacked. Reverting to the more conservative range gives the
+        // NimBLE stack enough headroom.
+        // 014 Quad-Glow: keep the neon border vivid (was dimmed to ~24-48,
+        // which looked dull). Border opacity is cheap — only the heavy shadow
+        // was a concern on the CYD, so that stays modest.
+        // 014 Quad-Glow: breathe the gradient-border frame's glow halo. On
+        // non-neon layouts (no frame) fall back to pulsing the card border.
+        if (panel_top.frame) {
+            lv_obj_set_style_shadow_opa(panel_top.frame, (lv_opa_t)(70 + (75 * s_top) / 255), 0);
+        } else if (panel_top.root) {
+            lv_obj_set_style_shadow_opa(panel_top.root, (lv_opa_t)(40 + (40 * s_top) / 255), 0);
+            lv_obj_set_style_border_opa(panel_top.root, (lv_opa_t)(200 + (55 * s_top) / 255), 0);
         }
-        if (panel_bottom.root) {
-            lv_obj_set_style_shadow_opa(panel_bottom.root, (lv_opa_t)(14 + (18 * s_bottom) / 255), 0);
-            lv_obj_set_style_border_opa(panel_bottom.root, (lv_opa_t)(20 + (18 * s_bottom) / 255), 0);
+        if (panel_bottom.frame) {
+            lv_obj_set_style_shadow_opa(panel_bottom.frame, (lv_opa_t)(60 + (70 * s_bottom) / 255), 0);
+        } else if (panel_bottom.root) {
+            lv_obj_set_style_shadow_opa(panel_bottom.root, (lv_opa_t)(34 + (34 * s_bottom) / 255), 0);
+            lv_obj_set_style_border_opa(panel_bottom.root, (lv_opa_t)(190 + (55 * s_bottom) / 255), 0);
         }
     }
 
@@ -1777,15 +2172,22 @@ int ui_get_view_state(void) {
     return view_state;
 }
 
+bool ui_has_usage_data(void) {
+    return data_received;
+}
+
+uint32_t ui_get_usage_data_age_ms(void) {
+    if (!data_received) return UINT32_MAX;
+    return lv_tick_get() - last_data_ms;
+}
+
+int ui_get_forced_view(void) {
+    return forced_view_override;
+}
+
 uint32_t ui_get_last_screen_change_time(void) {
     return s_last_screen_change;
 }
-
-#ifdef WIFI_FALLBACK_ENABLED
-UsageProvider ui_get_current_provider(void) {
-    return current_usage.provider;
-}
-#endif  // WIFI_FALLBACK_ENABLED
 void ui_force_view(int view) {
     if (view < 0 || view > 2) return;
     if (current_screen != SCREEN_USAGE) return;
@@ -1797,12 +2199,24 @@ bool ui_is_ble_connected(void) {
     return s_ble_connected;
 }
 
+bool ui_has_active_transport(void) {
+    return s_ble_connected || s_wifi_state == WIFI_FALLBACK_CONNECTED;
+}
+
 
 void ui_update_ble_status(ble_state_t state, const char* name, const char* mac) {
     (void)name;
     (void)mac;
     s_ble_connected = (state == BLE_STATE_CONNECTED);
     if (!s_ble_connected) forced_view_override = -1;
+    update_view_state();
+}
+
+void ui_update_wifi_status(wifi_fallback_state_t state) {
+    if (s_wifi_state == state) return;
+    s_wifi_state = state;
+    update_header_connection_state();
+    update_header_title_for_view(view_state);
     update_view_state();
 }
 

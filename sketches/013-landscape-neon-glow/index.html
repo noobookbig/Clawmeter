@@ -89,6 +89,8 @@
       color: #d8d4ca;
     }
     .switches { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+    .wifi-switches { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+    .wifi-switches button { padding: 6px 10px; font-size: 11px; }
     button {
       appearance: none;
       border: 1px solid rgba(255,255,255,.09);
@@ -155,6 +157,43 @@
       align-items: center;
     }
     .header-right { justify-content: flex-end; gap: 6px; }
+    .wifi-header-icon {
+      display: none;          /* hidden by default; shown when wifi is active */
+      align-items: center;
+      justify-content: center;
+      width: 14px;
+      height: 16px;
+      transition: opacity .3s ease, filter .3s ease, color .3s ease;
+    }
+    .wifi-header-icon.active {
+      display: inline-flex;
+    }
+    /* connected = green chevrons + dot, no pulse */
+    .wifi-header-icon.connected {
+      color: #34b55a;
+      filter: drop-shadow(0 0 4px rgba(52,181,90,.50));
+    }
+    /* standby = muted cyan (credentials in NVS, link not yet up) */
+    .wifi-header-icon.standby {
+      color: #6ac4d8;
+      opacity: .65;
+      filter: drop-shadow(0 0 3px rgba(106,196,216,.30));
+    }
+    /* connecting = orange, slow pulse */
+    .wifi-header-icon.connecting {
+      color: #ffaa4d;
+      filter: drop-shadow(0 0 4px rgba(255,170,77,.45));
+      animation: wifiPulse 1.4s ease-in-out infinite;
+    }
+    /* error = red, no animation */
+    .wifi-header-icon.error {
+      color: #ff6b57;
+      filter: drop-shadow(0 0 4px rgba(255,107,87,.50));
+    }
+    @keyframes wifiPulse {
+      0%, 100% { opacity: .55; }
+      50%      { opacity: 1; }
+    }
     .ble-header-icon {
       display: flex;
       align-items: center;
@@ -586,19 +625,28 @@
 <body>
   <div class="stage">
     <section class="copy">
-      <div class="eyebrow">Clawdmeter · Neon Glow v0.3</div>
+      <div class="eyebrow">Clawdmeter · Neon Glow v0.4</div>
       <h1>Futuristic neon on dark — for ILI9341</h1>
-      <p>Dark void base (no large smooth light gradients — ILI9341 R is 16-bit RGB565 and would band). Glow comes from box-shadow halos and neon-coloured borders, not from solid fills. Cyan / magenta accents stay sharp on small surfaces.</p>
+      <p>Dark void base (no large smooth light gradients — ILI9341 R is 16-bit RGB565 and would band). Glow comes from box-shadow halos and neon-coloured borders, not from solid fills. Cyan / magenta accents stay sharp on small surfaces. WiFi icon appears left of BLE when wifi_fallback is active (click it in this mock to cycle states).</p>
       <div class="tags">
         <span class="tag">landscape 320×240</span>
         <span class="tag">dark base</span>
         <span class="tag">cyan #00e5ff</span>
         <span class="tag">magenta #ff2bd6</span>
+        <span class="tag">wifi indicator</span>
       </div>
       <div class="switches">
         <button class="active" data-target="usage">Live usage</button>
         <button data-target="pair">Pairing</button>
         <button data-target="idle">Idle</button>
+      </div>
+      <div class="wifi-switches" style="margin-top: 10px;">
+        <span style="font-size:11px;color:#8a8578;align-self:center;margin-right:4px;">WiFi:</span>
+        <button data-wifi="off">Off</button>
+        <button data-wifi="standby">Standby</button>
+        <button data-wifi="connecting">Connecting</button>
+        <button class="active" data-wifi="connected">Connected</button>
+        <button data-wifi="error">Error</button>
       </div>
     </section>
 
@@ -613,6 +661,16 @@
               <div class="provider-line"><span class="provider-badge" id="titleProvider">OPENCODE</span></div>
             </div>
             <div class="header-right">
+              <div class="wifi-header-icon" id="wifiHeaderIcon" aria-hidden="true">
+                <svg width="14" height="16" viewBox="0 0 14 16" fill="none">
+                  <!-- top arc (two segments) -->
+                  <path d="M1 5 L4 2 L7 1 L10 2 L13 5" stroke="currentColor" stroke-width="1" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+                  <!-- inner arc -->
+                  <path d="M4 8 L7 6 L10 8" stroke="currentColor" stroke-width="1" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+                  <!-- station dot -->
+                  <rect x="6" y="12" width="3" height="3" fill="currentColor" rx="0.5"/>
+                </svg>
+              </div>
               <div class="ble-header-icon" id="bleHeaderIcon" aria-hidden="true">
                 <svg width="10" height="16" viewBox="0 0 10 16"><path d="M5 16V0M2 4l6 6M8 4L2 10" stroke="#00e5ff" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
               </div>
@@ -830,6 +888,7 @@ function _syncUsageDot(c) { if(_eD)_eD.classList.toggle('offline',!c); }
 const screen = document.getElementById('screen');
 const agentLink = document.getElementById('agentLink');
 const bleIcon = document.getElementById('bleHeaderIcon');
+const wifiIcon = document.getElementById('wifiHeaderIcon');
 const titleProvider = document.getElementById('titleProvider');
 const slash = agentLink.querySelector('.slash');
 const syncHeader = state => {
@@ -841,6 +900,28 @@ const syncHeader = state => {
     titleProvider.textContent = 'OPENCODE';
   }
 };
+
+// ----- WiFi icon (mirrors firmware update_header_connection_state) -----
+//   'off'        → hidden (default; WiFi fallback not configured)
+//   'connecting' → orange chevrons + dot, 1.4s opacity pulse
+//   'connected'  → green chevrons + dot, glow halo
+//   'error'      → red chevrons + dot, glow halo
+const _setWifiState = wifiState => {
+  if (!wifiIcon) return;
+  wifiIcon.classList.remove('active', 'connected', 'connecting', 'error', 'standby');
+  if (wifiState === 'off' || !wifiState) return;
+  wifiIcon.classList.add('active', wifiState);
+  wifiIcon.setAttribute('aria-label', `WiFi ${wifiState}`);
+};
+// Demo: cycle through the three states when the user clicks the WiFi icon,
+// so the sketch mockup shows the connecting/connected/error variants
+// without needing a real daemon.
+let _wifiDemo = 0;
+const _wifiStates = ['off', 'standby', 'connecting', 'connected', 'error'];
+if (wifiIcon) wifiIcon.addEventListener('click', () => {
+  _wifiDemo = (_wifiDemo + 1) % _wifiStates.length;
+  _setWifiState(_wifiStates[_wifiDemo]);
+});
 
 function setState(state) {
   screen.dataset.state = state;
@@ -856,13 +937,25 @@ function setState(state) {
 // Init
 syncHeader(screen.dataset.state);
 setState(screen.dataset.state);
+// Default WiFi state for the mockup: connected (green) so the icon shows
+// immediately on first paint. Real firmware is driven by wifi_fallback.
+_setWifiState('connected');
 
-// Buttons
+// Buttons (screen state)
 for (const btn of document.querySelectorAll('button[data-target]')) {
   btn.addEventListener('click', () => {
     document.querySelectorAll('button[data-target]').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     setState(btn.dataset.target);
+  });
+}
+
+// Buttons (WiFi state) — toggles the header WiFi indicator in real time.
+for (const btn of document.querySelectorAll('button[data-wifi]')) {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('button[data-wifi]').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    _setWifiState(btn.dataset.wifi);
   });
 }
 </script>

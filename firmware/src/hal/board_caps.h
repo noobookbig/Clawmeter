@@ -19,6 +19,11 @@ struct BoardCaps {
     bool    has_battery;     // AXP2101 battery measurement is meaningful
     bool    has_imu;         // QMI8658 (or compatible) is populated
     bool    always_on;       // true = board never sleeps (no battery, USB always on)
+    bool    neon_theme;      // 013 landscape neon-glow theme (cyan/magenta,
+                             // banding-free). Only meaningful in landscape.
+    bool    has_psram;       // true = OPI/QSPI PSRAM populated. Lets the shared
+                             // code render feature buffers (e.g. screen grid)
+                             // that would otherwise overflow CYD's 320 KB DRAM.
 };
 
 const BoardCaps& board_caps(void);
