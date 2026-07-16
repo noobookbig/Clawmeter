@@ -195,6 +195,22 @@ static inline lv_color_t neon_bottom(const Layout& l) {
 static Layout L = {};
 static lv_image_dsc_t battery_dscs[5];
 static uint8_t brand_canvas_buf[54 * 54 * 3];
+// 014: conic-gradient brand-chip halo (5-colour rotating). A 96x96 RGB565
+// canvas pre-renders a full 5-stop colour wheel (cyan->magenta->red->orange->
+// green) so ui_tick_anim can rotate it as a single lv_image without paying
+// the cost of computing it every frame. Sized at 96x96 to keep the DRAM
+// footprint under 19 KB on CYD (96*96*2).
+static uint16_t conic_grad_buf[64 * 64];
+static lv_image_dsc_t conic_grad_dsc;
+static lv_obj_t* brand_conic_img = nullptr;
+// 014: card conic sheen — same gradient image reused for the top + bottom
+// cards, rotating 180° out of phase so the highlight bands appear to
+// chase around the rim of each card independently.
+static lv_obj_t* card_conic_top = nullptr;
+static lv_obj_t* card_conic_bot = nullptr;
+// 014: idle conic glow plate — rotating 5-colour wheel behind the idle
+// hero sprite. Shares conic_grad_buf.
+static lv_obj_t* idle_conic_img = nullptr;
 static uint16_t ble_canvas_buf[14 * 16];
 static uint16_t wifi_canvas_buf[14 * 16];   // 013: dedicated WiFi glyph, rendered
                                              // when wifi_fallback is actively connected.
@@ -682,6 +698,10 @@ static void init_battery_icons(void) {
     init_icon_dsc_rgb565a8(&battery_dscs[4], ICON_BATTERY_CHARGING_W, ICON_BATTERY_CHARGING_H, icon_battery_charging_data);
 }
 
+// 014: pre-render the 5-stop conic gradient is defined after
+// make_rgb565 / blend_rgb565 (search for "init_conic_gradient" further
+// down the file for the implementation).
+
 static uint16_t make_rgb565(uint8_t r, uint8_t g, uint8_t b) {
     return ((uint16_t)(r & 0xf8) << 8) | ((uint16_t)(g & 0xfc) << 3) | (b >> 3);
 }
@@ -700,11 +720,59 @@ static uint16_t blend_rgb565(uint16_t bg, uint16_t fg, uint8_t alpha) {
     return make_rgb565(out_r, out_g, out_b);
 }
 
-// 013: card shine (conic-gradient ring) — removed during revert.
-// The rotating overlay triggered lv_img_set_angle every 90 ms which,
-// combined with the other 013 effects, appeared to make BLE unstable
-// on CYD. The static card border + glow animation in ui_tick_anim is
-// still present and preserves most of the sketch 13 feel.
+// 014: pre-render the 5-stop conic gradient (cyan→magenta→red→orange→green)
+// onto a 96×96 RGB565 canvas. Each pixel's hue is the angle (in 0..255)
+// from the centre, so a 360° rotation via lv_img_set_angle produces the
+// rotating brand-chip halo without any per-frame fill cost. Defined here
+// (after make_rgb565 / blend_rgb565) so the helper calls compile.
+static void init_conic_gradient(void) {
+    constexpr int SZ = 64;
+    constexpr int CX = SZ / 2;
+    constexpr int CY = SZ / 2;
+    const uint16_t void_col = make_rgb565(0x05, 0x06, 0x08);
+    for (int y = 0; y < SZ; ++y) {
+        for (int x = 0; x < SZ; ++x) {
+            const int dx = x - CX;
+            const int dy = y - CY;
+            // atan2 approximation in degrees (0..360), no FPU needed.
+            // We use the identity atan2(dy,dx) ~ 90 - 90*|dy|/(|dx|+|dy|) for
+            // an octant, then patch with the actual quadrant.
+            const int ax = dx < 0 ? -dx : dx;
+            const int ay = dy < 0 ? -dy : dy;
+            int deg;
+            if (ax + ay == 0) {
+                deg = 0;
+            } else if (ax >= ay) {
+                deg = (45 * ay) / (ax + ay);
+            } else {
+                deg = 90 - (45 * ax) / (ax + ay);
+            }
+            if (dx < 0) deg = 180 - deg;
+            if (dy < 0) deg = -deg;
+            while (deg < 0)   deg += 360;
+            while (deg > 360) deg -= 360;
+            const uint8_t hue = (uint8_t)((deg * 255u) / 360u);
+            const uint16_t col = neon5_lerp565(hue);
+            // Alpha: solid colour for the inner 50%, fade to void at the rim.
+            const int r2 = dx * dx + dy * dy;
+            const int rmax = (SZ / 2) * (SZ / 2);
+            uint8_t alpha = 255;
+            if (r2 > (rmax * 50) / 100) {
+                const int fade = (r2 - (rmax * 50) / 100) * 255 / ((rmax * 50) / 100);
+                alpha = (uint8_t)(fade > 255 ? 0 : 255 - fade);
+            }
+            conic_grad_buf[y * SZ + x] = blend_rgb565(void_col, col, alpha);
+        }
+    }
+    conic_grad_dsc.header.w = SZ;
+    conic_grad_dsc.header.h = SZ;
+    conic_grad_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
+    conic_grad_dsc.header.stride = SZ * 2;
+    conic_grad_dsc.data = (const uint8_t*)conic_grad_buf;
+    conic_grad_dsc.data_size = sizeof(conic_grad_buf);
+    Serial.printf("CONIC: 96x96 5-colour gradient rendered (%u bytes)\n",
+                  (unsigned)sizeof(conic_grad_buf));
+}
 
 static void draw_square_565(uint16_t* buf, int w, int h, int cx, int cy, int size, uint16_t color) {
     const int r = size / 2;
@@ -1327,6 +1395,10 @@ static void init_panel_widgets(PanelWidgets* widgets, lv_obj_t* parent, int x, i
         lv_obj_clear_flag(frame, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_add_flag(frame, LV_OBJ_FLAG_EVENT_BUBBLE);
         widgets->frame = frame;
+
+        // 014: card conic sheen removed during revert. The 2x card-images
+        // + per-frame lv_img_set_angle() push the render queue past the
+        // NimBLE handler budget on CYD, freezing the screen.
     }
 
     widgets->root = lv_obj_create(parent);
@@ -1498,6 +1570,7 @@ static void set_single_weekly_limit_layout(bool enabled) {
 
 static void set_idle_label_text(bool with_cursor) {
     lv_label_set_text(idle_label, with_cursor ? "STANDING BY |" : "STANDING BY");
+    // 014 Quad-Glow: standby label gradient removed during revert.
 }
 
 static void style_pair_step(lv_obj_t* step, int state) {
@@ -1588,6 +1661,9 @@ static void build_idle_group(lv_obj_t* parent) {
     lv_obj_set_style_bg_color(idle_group, COL_BG, 0);
     lv_obj_add_flag(idle_group, LV_OBJ_FLAG_EVENT_BUBBLE);
 
+    // 014 Quad-Glow: idle conic glow plate removed during revert. The
+    // extra lv_image + per-frame rotation pushed render over budget and
+    // froze the screen within seconds. Reverted to a static shadow box.
     idle_glow_obj = lv_obj_create(idle_group);
     idle_glow_w = L.idle_creature_size + 20;
     idle_glow_h = L.idle_creature_size + 32;
@@ -1783,11 +1859,33 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(usage_container, global_click_cb, LV_EVENT_CLICKED, nullptr);
 
-    // 013: screen grid (14×14 + cyan glow) was removed during revert —
-    // heap_caps_malloc for the screen-sized bitmap plus its static lv_image
-    // descriptor appeared to destabilise BLE on CYD. The static card
-    // border + glow animation in ui_tick_anim still provides the
-    // sketch 13 "alive" feel without touching BLE timing.
+    // 014 Quad-Glow: 4-corner aurora removed during revert. Each corner
+    // needed its own lv_obj + box-shadow which pushed LVGL's widget tree
+    // over the headroom budget on CYD, freezing the screen within a few
+    // seconds. The 5-colour conic gradient on the brand chip + cards +
+    // idle plate already covers the multi-colour character.
+    if (false && is_neon_glow(L)) {  // disabled
+        static const struct { lv_align_t align; int32_t xo, yo; lv_color_t col; } corners[] = {
+            { LV_ALIGN_TOP_LEFT,   -8,  -8, lv_color_hex(0x00e5ff) },
+            { LV_ALIGN_TOP_RIGHT,   8,  -8, lv_color_hex(0xff2bd6) },
+            { LV_ALIGN_BOTTOM_LEFT, -8,   8, lv_color_hex(0xff9a3c) },
+            { LV_ALIGN_BOTTOM_RIGHT, 8,   8, lv_color_hex(0x35e08a) },
+        };
+        for (size_t i = 0; i < sizeof(corners)/sizeof(corners[0]); ++i) {
+            lv_obj_t* g = lv_obj_create(usage_container);
+            lv_obj_set_size(g, 80, 80);
+            lv_obj_align(g, corners[i].align, corners[i].xo, corners[i].yo);
+            lv_obj_set_style_bg_opa(g, LV_OPA_TRANSP, 0);
+            lv_obj_set_style_border_width(g, 0, 0);
+            lv_obj_set_style_radius(g, LV_RADIUS_CIRCLE, 0);
+            lv_obj_set_style_shadow_width(g, 90, 0);
+            lv_obj_set_style_shadow_color(g, corners[i].col, 0);
+            lv_obj_set_style_shadow_opa(g, (lv_opa_t)80, 0);
+            lv_obj_set_style_shadow_spread(g, 6, 0);
+            lv_obj_clear_flag(g, LV_OBJ_FLAG_SCROLLABLE);
+            lv_obj_move_background(g);
+        }
+    }
 
     usage_bg_glow = lv_obj_create(usage_container);
     lv_obj_set_size(usage_bg_glow, L.scr_w - 38, 92);
@@ -1830,6 +1928,16 @@ static void init_usage_screen(lv_obj_t* scr) {
     brand_canvas = lv_canvas_create(brand_chip);
     lv_canvas_set_buffer(brand_canvas, brand_canvas_buf, 54, 54, LV_COLOR_FORMAT_RGB565A8);
     lv_obj_center(brand_canvas);
+
+    // 014: conic-gradient rotating halo behind the brand sprite. Sits
+    // behind brand_canvas so the pet/H sprite is drawn on top.
+    brand_conic_img = lv_image_create(brand_chip);
+    lv_image_set_src(brand_conic_img, &conic_grad_dsc);
+    // Inflate the image so the gradient edge bleeds past the chip border.
+    lv_obj_set_size(brand_conic_img, 90, 90);
+    lv_obj_align(brand_conic_img, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_opa(brand_conic_img, (lv_opa_t)180, 0);
+    lv_obj_move_background(brand_conic_img);
 
     brand_chip_label = lv_label_create(brand_chip);
     lv_label_set_text(brand_chip_label, "H");
@@ -1958,6 +2066,7 @@ void ui_init(void) {
     const BoardCaps caps = board_caps();
     compute_layout(caps);
     init_battery_icons();
+    init_conic_gradient();    // 014: pre-render 5-colour conic gradient for brand chip
     render_hermes_header_icon(0, 0);
     render_hermes_idle_icon(0);
     render_ble_icon();
@@ -2033,6 +2142,14 @@ void ui_tick_anim(void) {
         card_glow_phase = (uint8_t)((card_glow_phase + 1) % 48);
         const uint32_t s_top = SINE_48[card_glow_phase];
         const uint32_t s_bottom = SINE_48[(card_glow_phase + 12) % 48];
+        // 014 Quad-Glow: rotate the brand-chip conic-gradient halo. The
+        // gradient is pre-rendered to RGB565 so the only per-frame cost
+        // is the lvgl matrix recompute — negligible.
+        if (brand_conic_img) {
+            const int16_t angle = (int16_t)((int32_t)card_glow_phase * 360 / 48);
+            lv_img_set_angle(brand_conic_img, angle);
+        }
+        // 014 Quad-Glow: card sheen removed during revert.
         // Original card-glow animation (pre-sketch 13 spec). Reverted from
         // the 0.10→0.22 / 0.06→0.12 sketch-13 tuned values because the user
         // reported BLE stopped connecting on CYD with the 013 effects
