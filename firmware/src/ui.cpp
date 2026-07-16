@@ -1396,9 +1396,10 @@ static void init_panel_widgets(PanelWidgets* widgets, lv_obj_t* parent, int x, i
         lv_obj_add_flag(frame, LV_OBJ_FLAG_EVENT_BUBBLE);
         widgets->frame = frame;
 
-        // 014: card conic sheen removed during revert. The 2x card-images
-        // + per-frame lv_img_set_angle() push the render queue past the
-        // NimBLE handler budget on CYD, freezing the screen.
+        // 014 Quad-Glow: card conic sheen removed during second revert.
+        // The single-image rotation on top of the brand chip + idle plate
+        // (3 lv_image rotations total) puts the partial renderer's
+        // repaint queue into a state where it eventually drops events.
     }
 
     widgets->root = lv_obj_create(parent);
@@ -1570,7 +1571,7 @@ static void set_single_weekly_limit_layout(bool enabled) {
 
 static void set_idle_label_text(bool with_cursor) {
     lv_label_set_text(idle_label, with_cursor ? "STANDING BY |" : "STANDING BY");
-    // 014 Quad-Glow: standby label gradient removed during revert.
+    // 014 Quad-Glow: standby label gradient removed during second revert.
 }
 
 static void style_pair_step(lv_obj_t* step, int state) {
@@ -1661,9 +1662,9 @@ static void build_idle_group(lv_obj_t* parent) {
     lv_obj_set_style_bg_color(idle_group, COL_BG, 0);
     lv_obj_add_flag(idle_group, LV_OBJ_FLAG_EVENT_BUBBLE);
 
-    // 014 Quad-Glow: idle conic glow plate removed during revert. The
-    // extra lv_image + per-frame rotation pushed render over budget and
-    // froze the screen within seconds. Reverted to a static shadow box.
+    // 014 Quad-Glow: idle conic glow plate removed during second revert.
+    // (A2 + B + D combination froze the screen on the second try — the
+    // extra lv_image on top of the two card sheens tipped it over.)
     idle_glow_obj = lv_obj_create(idle_group);
     idle_glow_w = L.idle_creature_size + 20;
     idle_glow_h = L.idle_creature_size + 32;
@@ -1859,11 +1860,10 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(usage_container, global_click_cb, LV_EVENT_CLICKED, nullptr);
 
-    // 014 Quad-Glow: 4-corner aurora removed during revert. Each corner
-    // needed its own lv_obj + box-shadow which pushed LVGL's widget tree
-    // over the headroom budget on CYD, freezing the screen within a few
-    // seconds. The 5-colour conic gradient on the brand chip + cards +
-    // idle plate already covers the multi-colour character.
+    // 014 Quad-Glow: 4-corner aurora removed during second revert.
+    // Even on its own (after A2 + B + D passed) it pushed the screen
+    // into a hard freeze. The 4 corner lv_obj + box-shadow combos create
+    // too many simultaneous repaint sources for the partial renderer.
     if (false && is_neon_glow(L)) {  // disabled
         static const struct { lv_align_t align; int32_t xo, yo; lv_color_t col; } corners[] = {
             { LV_ALIGN_TOP_LEFT,   -8,  -8, lv_color_hex(0x00e5ff) },
@@ -2149,7 +2149,7 @@ void ui_tick_anim(void) {
             const int16_t angle = (int16_t)((int32_t)card_glow_phase * 360 / 48);
             lv_img_set_angle(brand_conic_img, angle);
         }
-        // 014 Quad-Glow: card sheen removed during revert.
+        // 014 Quad-Glow: card sheen removed during second revert.
         // Original card-glow animation (pre-sketch 13 spec). Reverted from
         // the 0.10→0.22 / 0.06→0.12 sketch-13 tuned values because the user
         // reported BLE stopped connecting on CYD with the 013 effects
@@ -2216,9 +2216,14 @@ void ui_tick_anim(void) {
                 const int16_t h = idle_glow_h + (int16_t)((idle_glow_h * 4 / 100) * gf / 255u);
                 lv_obj_set_size(idle_glow_obj, w, h);
                 lv_obj_align(idle_glow_obj, LV_ALIGN_CENTER, 0, L.idle_creature_dy);
-                lv_obj_set_style_bg_opa(idle_glow_obj, (lv_opa_t)(10 + (15 * gf) / 255u), 0);
-                lv_obj_set_style_border_opa(idle_glow_obj, (lv_opa_t)(8 + (7 * gf) / 255u), 0);
-                lv_obj_set_style_shadow_opa(idle_glow_obj, (lv_opa_t)(8 + (12 * gf) / 255u), 0);
+                lv_obj_set_style_opa(idle_glow_obj, (lv_opa_t)(80 + (80 * gf) / 255u), 0);
+                // 014 Quad-Glow: rotate the 5-colour conic gradient behind
+                // the idle hero. The opposite phase from the card sheen
+                // so the rotating bands don't all line up.
+                if (idle_conic_img) {
+                    const int16_t angle = (int16_t)(((int32_t)idle_glow_phase * 360 / 48 + 90) % 360);
+                    lv_img_set_angle(idle_conic_img, angle);
+                }
             }
         }
 
