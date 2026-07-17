@@ -78,6 +78,23 @@ static inline uint16_t neon5_lerp565(uint8_t t) {
     return (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (bl >> 3));
 }
 
+// 014 Quad-Glow: title-rainbow callback. lv_anim fires this every frame
+// with `v` in [0..255]; we sample the 5-colour neon ramp and unpack the
+// RGB565 to RGB888 channels for lv_color_make(). Cycling 0→255→0 every
+// 14 s (7 s forward + 7 s reverse) produces a smooth rainbow sweep
+// matching the sketch 013 'titleSweep' animation.
+static void title_text_color_anim_cb(void* var, int32_t v) {
+    const uint16_t c565 = neon5_lerp565((uint8_t)v);
+    // Unpack RGB565 (5-6-5 bits) into RGB888 (8-8-8) by shifting the high
+    // bits back into the low positions and replicating them so the LSBs
+    // aren't pure black when the source channel is 0.
+    const lv_color_t c = lv_color_make(
+        ((c565 >> 11) & 0x1F) << 3,    // R: top 5 bits → top 8 bits
+        ((c565 >>  5) & 0x3F) << 2,    // G: top 6 bits → top 8 bits
+        ( c565        & 0x1F) << 3);    // B: top 5 bits → top 8 bits
+    lv_obj_set_style_text_color((lv_obj_t*)var, c, 0);
+}
+
 // Resolve the two accent colors for the current layout mode.
 //   landscape_small / portrait / large → blue + yellow (Hermes)
 //   landscape_neon_glow               → cyan + magenta
@@ -1950,9 +1967,26 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_label_set_text(lbl_title, "Remaining");
     lv_obj_set_width(lbl_title, L.title_w);
     lv_obj_set_style_text_font(lbl_title, L.title_font, 0);
-    // 014 Quad-Glow: the title is a neon cyan (the sketch runs a gradient
-    // sweep; a solid cyan is the closest single-colour LVGL label match).
-    lv_obj_set_style_text_color(lbl_title, is_neon_glow(L) ? COL_NEON_CYAN : lv_color_hex(0xf7f3ea), 0);
+    // 014 Quad-Glow: the title cycles through the 5-colour neon ramp
+    // (cyan→magenta→red→orange→green→cyan) every 7s, ping-pong style.
+    // This is the LVGL-friendly equivalent of the sketch 013 CSS
+    // 'titleSweep' animation — we can't do per-pixel gradient text on
+    // the 565 framebuffer without a full redraw, but a per-frame
+    // text_colour animation reads as a smooth rainbow at a glance.
+    if (is_neon_glow(L)) {
+        lv_obj_set_style_text_color(lbl_title, COL_NEON_CYAN, 0);
+        static lv_anim_t title_anim;
+        lv_anim_init(&title_anim);
+        lv_anim_set_var(&title_anim, lbl_title);
+        lv_anim_set_exec_cb(&title_anim, title_text_color_anim_cb);
+        lv_anim_set_values(&title_anim, 0, 255);
+        lv_anim_set_duration(&title_anim, 7000);
+        lv_anim_set_playback_duration(&title_anim, 7000);
+        lv_anim_set_repeat_count(&title_anim, LV_ANIM_REPEAT_INFINITE);
+        lv_anim_start(&title_anim);
+    } else {
+        lv_obj_set_style_text_color(lbl_title, lv_color_hex(0xf7f3ea), 0);
+    }
     lv_obj_set_pos(lbl_title, L.title_x, L.title_y);
 
     lbl_provider = lv_label_create(header_group);
