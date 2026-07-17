@@ -95,6 +95,15 @@ static void title_text_color_anim_cb(void* var, int32_t v) {
     lv_obj_set_style_text_color((lv_obj_t*)var, c, 0);
 }
 
+// 014 Quad-Glow: per-panel %-digit rainbow. The animation re-renders
+// the pixel-art buffer in a different neon colour every 7 s (forward +
+// reverse) — same timing as the title sweep so the whole header
+// "breathes" in lock-step. ctx carries the panel's specific string
+// ("37%") and buffer/canvas pointers so the same callback can drive
+// either top or bottom from a single lv_anim_t.
+struct PctRainbowCtx;
+static void pct_rainbow_anim_cb(void* var, int32_t v);  // forward decl
+
 // Resolve the two accent colors for the current layout mode.
 //   landscape_small / portrait / large → blue + yellow (Hermes)
 //   landscape_neon_glow               → cyan + magenta
@@ -289,14 +298,18 @@ static const uint8_t PIXEL_FONT_5x7[11][7] = {
 // RGB565 buffer big enough to hold 3 digits (0–9 0–9 %) at scale=4
 // (60×21 px). Pre-allocated so we don't malloc inside the set_*_panel
 // path (which is called on every BLE payload arrival).
-static constexpr int PCT_SCALE   = 4;
-static constexpr int PCT_GLYPH_W = 5 * PCT_SCALE;     // 20
-static constexpr int PCT_GLYPH_H = 7 * PCT_SCALE;     // 28
-static constexpr int PCT_GAP     = 2 * PCT_SCALE;     // 8
-static constexpr int PCT_BUF_W   = 3 * PCT_GLYPH_W + 2 * PCT_GAP;  // 76
-static constexpr int PCT_BUF_H   = PCT_GLYPH_H;        // 28
-static uint16_t pct_buf_top[ PCT_BUF_W * PCT_BUF_H ];
-static uint16_t pct_buf_bot[ PCT_BUF_W * PCT_BUF_H ];
+static constexpr int PCT_SCALE   = 3;             // 1 block = 3 px (smaller = chunky + fits)
+static constexpr int PCT_GLYPH_W = 5 * PCT_SCALE;     // 15
+static constexpr int PCT_GLYPH_H = 7 * PCT_SCALE;     // 21
+static constexpr int PCT_GAP     = 2 * PCT_SCALE;     // 6
+static constexpr int PCT_BUF_W   = 3 * PCT_GLYPH_W + 2 * PCT_GAP;  // 57
+static constexpr int PCT_BUF_H   = PCT_GLYPH_H;        // 21
+// 014 Quad-Glow: switch to ARGB8888 so the BG can be transparent
+// (alpha = 0), letting the card gradient frame and aurora corners
+// show through the gaps between pixel blocks. RGB565 has no alpha
+// channel so the BG would otherwise have to be a solid colour.
+static uint32_t pct_buf_top[ PCT_BUF_W * PCT_BUF_H ];
+static uint32_t pct_buf_bot[ PCT_BUF_W * PCT_BUF_H ];
 static lv_image_dsc_t pct_dsc_top;
 static lv_image_dsc_t pct_dsc_bot;
 
@@ -304,9 +317,18 @@ static lv_image_dsc_t pct_dsc_bot;
 // the given (x, y) top-left, using `scale` and the given colour. The 5x7
 // glyph is left-aligned in its 5-wide cell with 1 px of top padding
 // skipped (only 6 rows visible — same proportion as the HTML sketch).
-static void render_pixel_glyph(uint16_t* buf, int buf_w, int buf_h,
+static void render_pixel_glyph(uint32_t* buf, int buf_w, int buf_h,
                                  int char_idx, int x, int y,
                                  int scale, uint16_t color) {
+    // ARGB8888: top byte is alpha (0xFF = opaque). The lower 24 bits
+    // are the RGB value lifted from RGB565 (high bits replicated into
+    // the low bits so saturated colours stay saturated on the 8-bit
+    // channels).
+    const uint32_t a = 0xFF000000u;
+    const uint32_t r8 = (color >> 8)  & 0xF8;
+    const uint32_t g8 = (color >> 3)  & 0xFC;
+    const uint32_t b8 = (color << 3)  & 0xF8;
+    const uint32_t argb = a | (r8 << 16) | (g8 << 8) | b8;
     for (int row = 0; row < 7; row++) {
         const uint8_t bits = PIXEL_FONT_5x7[char_idx][row];
         for (int col = 0; col < 5; col++) {
@@ -316,7 +338,7 @@ static void render_pixel_glyph(uint16_t* buf, int buf_w, int buf_h,
                         const int px = x + col * scale + dx;
                         const int py = y + row * scale + dy;
                         if (px >= 0 && px < buf_w && py >= 0 && py < buf_h) {
-                            buf[py * buf_w + px] = color;
+                            buf[py * buf_w + px] = argb;
                         }
                     }
                 }
@@ -326,11 +348,11 @@ static void render_pixel_glyph(uint16_t* buf, int buf_w, int buf_h,
 }
 
 // Render the percentage string ("NN%" or "--" when unknown) into the
-// RGB565 buffer, left-aligned, with a 1-pixel transparent margin.
-static void render_pixel_pct(uint16_t* buf, int buf_w, int buf_h,
+// ARGB8888 buffer. BG = transparent (alpha=0) so the card's gradient
+// frame / aurora corners show through the gaps between blocks.
+static void render_pixel_pct(uint32_t* buf, int buf_w, int buf_h,
                                const char* str, uint16_t color) {
-    // Clear the buffer (use screen background as transparent).
-    for (int i = 0; i < buf_w * buf_h; i++) buf[i] = 0x0000;
+    for (int i = 0; i < buf_w * buf_h; i++) buf[i] = 0x00000000u;
     int cx = 0;
     for (const char* c = str; *c && cx + PCT_GLYPH_W <= buf_w; c++) {
         int idx = -1;
@@ -342,13 +364,42 @@ static void render_pixel_pct(uint16_t* buf, int buf_w, int buf_h,
     }
 }
 
-static void pct_image_dsc_init(lv_image_dsc_t* dsc, uint16_t* buf) {
+static void pct_image_dsc_init(lv_image_dsc_t* dsc, uint32_t* buf) {
     dsc->header.w = PCT_BUF_W;
     dsc->header.h = PCT_BUF_H;
-    dsc->header.cf = LV_COLOR_FORMAT_RGB565;
-    dsc->header.stride = PCT_BUF_W * 2;
+    dsc->header.cf = LV_COLOR_FORMAT_ARGB8888;  // 4 bytes/px for alpha
+    dsc->header.stride = PCT_BUF_W * 4;
     dsc->data = (const uint8_t*)buf;
     dsc->data_size = (uint32_t)sizeof(pct_buf_top);
+}
+
+// 014 Quad-Glow: per-panel %-digit rainbow animation context. The
+// callback re-renders the ARGB8888 buffer with a 5-colour blend and
+// invalidates the canvas so LVGL re-uploads the new image on the next
+// frame. Persistent storage (lives for the program lifetime) so the
+// per-panel ctx survives between animation ticks.
+struct PctRainbowCtx {
+    lv_obj_t* canvas;
+    uint32_t* buf;
+    const char* str;
+    lv_color_t base;
+};
+
+// Forward declarations — pct_rainbow_anim_cb uses lv_color_to_rgb565
+// and blend_rgb565 which are defined later in the file.
+static uint16_t lv_color_to_rgb565(lv_color_t c);
+static uint16_t blend_rgb565(uint16_t bg, uint16_t fg, uint8_t alpha);
+
+static void pct_rainbow_anim_cb(void* var, int32_t v) {
+    PctRainbowCtx* ctx = (PctRainbowCtx*)var;
+    // Blend the panel's base colour (cyan for primary, green for
+    // secondary) with the full neon5 ramp so the digits breathe through
+    // magenta / red / orange while staying in the card's accent family.
+    const uint16_t c565_base = lv_color_to_rgb565(ctx->base);
+    const uint16_t c565_neon = neon5_lerp565((uint8_t)v);
+    const uint16_t c565 = blend_rgb565(c565_base, c565_neon, 80);
+    render_pixel_pct(ctx->buf, PCT_BUF_W, PCT_BUF_H, ctx->str, c565);
+    lv_obj_invalidate(ctx->canvas);
 }
 
 // LVGL 9.2/9.5 with LV_COLOR_DEPTH=16: lv_color_t has discrete r/g/b
@@ -1541,20 +1592,48 @@ static void init_panel_widgets(PanelWidgets* widgets, lv_obj_t* parent, int x, i
     // neon-glow retro-future feel.
     lv_obj_set_pos(widgets->pct, 0, L.pct_y);
 
-    // Initialize the persistent RGB565 image descriptors once. Each
+    // Initialize the persistent ARGB8888 image descriptors once. Each
     // panel (top/bottom) gets its own buffer + dsc so they can be
-    // updated independently when their % values diverge.
+    // updated independently when their % values diverge. ARGB8888 (not
+    // RGB565) is used so the BG can be transparent (alpha = 0) and the
+    // gaps between pixel blocks show the card's gradient frame.
     if (widgets == &panel_top) {
         pct_image_dsc_init(&pct_dsc_top, pct_buf_top);
         lv_canvas_set_buffer(widgets->pct, pct_buf_top,
-                             PCT_BUF_W, PCT_BUF_H, LV_COLOR_FORMAT_RGB565);
+                             PCT_BUF_W, PCT_BUF_H, LV_COLOR_FORMAT_ARGB8888);
     } else {
         pct_image_dsc_init(&pct_dsc_bot, pct_buf_bot);
         lv_canvas_set_buffer(widgets->pct, pct_buf_bot,
-                             PCT_BUF_W, PCT_BUF_H, LV_COLOR_FORMAT_RGB565);
+                             PCT_BUF_W, PCT_BUF_H, LV_COLOR_FORMAT_ARGB8888);
     }
     lv_obj_set_size(widgets->pct, PCT_BUF_W, PCT_BUF_H);
     lv_canvas_fill_bg(widgets->pct, lv_color_hex(0x0000), LV_OPA_TRANSP);
+
+    // 014 Quad-Glow: spin up a per-panel rainbow animation on the %
+    // digits. Persistent context (lives for the whole program) so the
+    // animation handler can reach the right canvas + buffer + string.
+    static PctRainbowCtx ctx_top;
+    static PctRainbowCtx ctx_bot;
+    static lv_anim_t anim_top;
+    static lv_anim_t anim_bot;
+    PctRainbowCtx* use_ctx = (widgets == &panel_top) ? &ctx_top : &ctx_bot;
+    lv_anim_t* use_anim = (widgets == &panel_top) ? &anim_top : &anim_bot;
+    use_ctx->canvas = widgets->pct;
+    use_ctx->buf    = (widgets == &panel_top) ? pct_buf_top : pct_buf_bot;
+    use_ctx->str    = (widgets == &panel_top) ? "37%" : "62%";
+    use_ctx->base   = is_neon_glow(L)
+        ? (secondary_card(accent) ? COL_NEON_GREEN : COL_NEON_CYAN)
+        : COL_TEXT;
+    // Initial render so the canvas isn't blank before the first tick.
+    pct_rainbow_anim_cb(use_ctx, 0);
+    lv_anim_init(use_anim);
+    lv_anim_set_var(use_anim, use_ctx);
+    lv_anim_set_exec_cb(use_anim, pct_rainbow_anim_cb);
+    lv_anim_set_values(use_anim, 0, 255);
+    lv_anim_set_duration(use_anim, 7000);
+    lv_anim_set_playback_duration(use_anim, 7000);
+    lv_anim_set_repeat_count(use_anim, LV_ANIM_REPEAT_INFINITE);
+    lv_anim_start(use_anim);
 
     widgets->pill = lv_label_create(widgets->root);
     style_pill(widgets->pill, accent);
@@ -1596,10 +1675,10 @@ static void set_usage_panel(PanelWidgets* widgets, const UsagePanelData* panel, 
     if (L.show_kicker) lv_label_set_text(widgets->kicker, heading);
 
     // 014 Quad-Glow: helper that re-renders the 5×7 pixel-art digits
-    // into the card's RGB565 canvas. Picks a colour that matches the
+    // into the card's ARGB8888 canvas. Picks a colour that matches the
     // card accent so primary = cyan, secondary = orange/green.
     auto render_pct = [&](const char* str, lv_color_t color) {
-        uint16_t* buf = (widgets == &panel_top) ? pct_buf_top : pct_buf_bot;
+        uint32_t* buf = (widgets == &panel_top) ? pct_buf_top : pct_buf_bot;
         render_pixel_pct(buf, PCT_BUF_W, PCT_BUF_H, str,
                          lv_color_to_rgb565(color));
         lv_obj_invalidate(widgets->pct);
@@ -2333,16 +2412,21 @@ void ui_tick_anim(void) {
         // 014 Quad-Glow: breathe the gradient-border frame's glow halo. On
         // non-neon layouts (no frame) fall back to pulsing the card border.
         if (panel_top.frame) {
-            lv_obj_set_style_shadow_opa(panel_top.frame, (lv_opa_t)(70 + (75 * s_top) / 255), 0);
+            // Border + shadow amplitude boosted from (70+75)/145 to
+            // (30+200)/230 so the user actually sees the breathing on
+            // the gradient frame's glow halo. Cheap on the render side.
+            lv_obj_set_style_shadow_opa(panel_top.frame, (lv_opa_t)(30 + (200 * s_top) / 255), 0);
         } else if (panel_top.root) {
-            lv_obj_set_style_shadow_opa(panel_top.root, (lv_opa_t)(40 + (40 * s_top) / 255), 0);
-            lv_obj_set_style_border_opa(panel_top.root, (lv_opa_t)(200 + (55 * s_top) / 255), 0);
+            lv_obj_set_style_shadow_opa(panel_top.root, (lv_opa_t)(20 + (80 * s_top) / 255), 0);
+            // Border opacity swings 100..255 — a 60 % range, the eye
+            // reads it as a clear "breathing" pulse.
+            lv_obj_set_style_border_opa(panel_top.root, (lv_opa_t)(100 + (155 * s_top) / 255), 0);
         }
         if (panel_bottom.frame) {
-            lv_obj_set_style_shadow_opa(panel_bottom.frame, (lv_opa_t)(60 + (70 * s_bottom) / 255), 0);
+            lv_obj_set_style_shadow_opa(panel_bottom.frame, (lv_opa_t)(30 + (180 * s_bottom) / 255), 0);
         } else if (panel_bottom.root) {
-            lv_obj_set_style_shadow_opa(panel_bottom.root, (lv_opa_t)(34 + (34 * s_bottom) / 255), 0);
-            lv_obj_set_style_border_opa(panel_bottom.root, (lv_opa_t)(190 + (55 * s_bottom) / 255), 0);
+            lv_obj_set_style_shadow_opa(panel_bottom.root, (lv_opa_t)(20 + (70 * s_bottom) / 255), 0);
+            lv_obj_set_style_border_opa(panel_bottom.root, (lv_opa_t)(100 + (155 * s_bottom) / 255), 0);
         }
     }
 
