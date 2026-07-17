@@ -209,6 +209,14 @@ static inline lv_color_t neon_bottom(const Layout& l) {
     return l.mode == LAYOUT_LANDSCAPE_NEON_GLOW ? COL_NEON_ORANGE : COL_YELLOW;
 }
 
+// 014 Quad-Glow: returns true if the panel passed to set_usage_panel()
+// is the secondary (bottom) card. The pixel-art digits on the
+// secondary card are tinted to match its bar fill (orange in neon mode,
+// green on hover) so the two cards read as a coordinated 5-colour pair.
+static inline bool secondary_card(lv_color_t accent) {
+    return lv_color_eq(accent, COL_YELLOW) || lv_color_eq(accent, COL_NEON_ORANGE);
+}
+
 static Layout L = {};
 static lv_image_dsc_t battery_dscs[5];
 static uint8_t brand_canvas_buf[54 * 54 * 3];
@@ -260,6 +268,98 @@ static lv_obj_t* idle_label = nullptr;
 static lv_obj_t* pair_steps[3] = {nullptr, nullptr, nullptr};
 static PanelWidgets panel_top = {};
 static PanelWidgets panel_bottom = {};
+
+// 014 Quad-Glow: 5×7 pixel-art font for the card percentage digits.
+// Each row is 7 bits MSB-first. Indices: 0-9 = digits, 10 = '%'.
+static const uint8_t PIXEL_FONT_5x7[11][7] = {
+    { 0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E }, // 0
+    { 0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E }, // 1
+    { 0x0E, 0x11, 0x01, 0x06, 0x08, 0x10, 0x1F }, // 2
+    { 0x0E, 0x11, 0x01, 0x06, 0x01, 0x11, 0x0E }, // 3
+    { 0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02 }, // 4
+    { 0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E }, // 5
+    { 0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E }, // 6
+    { 0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08 }, // 7
+    { 0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E }, // 8
+    { 0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C }, // 9
+    { 0x08, 0x08, 0x04, 0x02, 0x04, 0x08, 0x08 }, // %
+};
+
+// 014 Quad-Glow: 1× scale = 1 byte per pixel. Each card gets a small
+// RGB565 buffer big enough to hold 3 digits (0–9 0–9 %) at scale=4
+// (60×21 px). Pre-allocated so we don't malloc inside the set_*_panel
+// path (which is called on every BLE payload arrival).
+static constexpr int PCT_SCALE   = 4;
+static constexpr int PCT_GLYPH_W = 5 * PCT_SCALE;     // 20
+static constexpr int PCT_GLYPH_H = 7 * PCT_SCALE;     // 28
+static constexpr int PCT_GAP     = 2 * PCT_SCALE;     // 8
+static constexpr int PCT_BUF_W   = 3 * PCT_GLYPH_W + 2 * PCT_GAP;  // 76
+static constexpr int PCT_BUF_H   = PCT_GLYPH_H;        // 28
+static uint16_t pct_buf_top[ PCT_BUF_W * PCT_BUF_H ];
+static uint16_t pct_buf_bot[ PCT_BUF_W * PCT_BUF_H ];
+static lv_image_dsc_t pct_dsc_top;
+static lv_image_dsc_t pct_dsc_bot;
+
+// Render one character from PIXEL_FONT_5x7 onto the RGB565 buffer at
+// the given (x, y) top-left, using `scale` and the given colour. The 5x7
+// glyph is left-aligned in its 5-wide cell with 1 px of top padding
+// skipped (only 6 rows visible — same proportion as the HTML sketch).
+static void render_pixel_glyph(uint16_t* buf, int buf_w, int buf_h,
+                                 int char_idx, int x, int y,
+                                 int scale, uint16_t color) {
+    for (int row = 0; row < 7; row++) {
+        const uint8_t bits = PIXEL_FONT_5x7[char_idx][row];
+        for (int col = 0; col < 5; col++) {
+            if (bits & (1 << (4 - col))) {
+                for (int dy = 0; dy < scale; dy++) {
+                    for (int dx = 0; dx < scale; dx++) {
+                        const int px = x + col * scale + dx;
+                        const int py = y + row * scale + dy;
+                        if (px >= 0 && px < buf_w && py >= 0 && py < buf_h) {
+                            buf[py * buf_w + px] = color;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Render the percentage string ("NN%" or "--" when unknown) into the
+// RGB565 buffer, left-aligned, with a 1-pixel transparent margin.
+static void render_pixel_pct(uint16_t* buf, int buf_w, int buf_h,
+                               const char* str, uint16_t color) {
+    // Clear the buffer (use screen background as transparent).
+    for (int i = 0; i < buf_w * buf_h; i++) buf[i] = 0x0000;
+    int cx = 0;
+    for (const char* c = str; *c && cx + PCT_GLYPH_W <= buf_w; c++) {
+        int idx = -1;
+        if (*c >= '0' && *c <= '9') idx = *c - '0';
+        else if (*c == '%')     idx = 10;
+        if (idx < 0) continue;
+        render_pixel_glyph(buf, buf_w, buf_h, idx, cx, 0, PCT_SCALE, color);
+        cx += PCT_GLYPH_W + PCT_GAP;
+    }
+}
+
+static void pct_image_dsc_init(lv_image_dsc_t* dsc, uint16_t* buf) {
+    dsc->header.w = PCT_BUF_W;
+    dsc->header.h = PCT_BUF_H;
+    dsc->header.cf = LV_COLOR_FORMAT_RGB565;
+    dsc->header.stride = PCT_BUF_W * 2;
+    dsc->data = (const uint8_t*)buf;
+    dsc->data_size = (uint32_t)sizeof(pct_buf_top);
+}
+
+// LVGL 9.2/9.5 with LV_COLOR_DEPTH=16: lv_color_t has discrete r/g/b
+// channels (5-6-5 bits). Convert to a packed 16-bit RGB565 value with
+// the high bits replicated into the low bits (the 565→888 promotion
+// pattern) so the rendered digits look correctly saturated.
+static inline uint16_t lv_color_to_rgb565(lv_color_t c) {
+    return (uint16_t)(((c.red   & 0xF8) << 8)
+                    | ((c.green & 0xFC) << 3)
+                    | ( c.blue        >> 3));
+}
 
 static const char HERMES_HEADER_FRAME[] =
     "00000000011100000000"
@@ -1432,10 +1532,29 @@ static void init_panel_widgets(PanelWidgets* widgets, lv_obj_t* parent, int x, i
     lv_obj_set_pos(widgets->kicker, 0, L.kicker_y);
     if (!L.show_kicker) lv_obj_add_flag(widgets->kicker, LV_OBJ_FLAG_HIDDEN);
 
-    widgets->pct = lv_label_create(widgets->root);
-    lv_obj_set_style_text_font(widgets->pct, L.metric_font, 0);
-    lv_obj_set_style_text_color(widgets->pct, COL_TEXT, 0);
+    widgets->pct = lv_canvas_create(widgets->root);
+    // 014 Quad-Glow: replace the smooth text label with a 5×7 bitmap
+    // "pixel art" digits. We render the percentage into a tiny RGB565
+    // buffer (one cell = one block) and re-upload the image descriptor
+    // every time set_usage_panel runs. Visual effect: chunky monospace
+    // digits that look like an 80s embedded LCD, in keeping with the
+    // neon-glow retro-future feel.
     lv_obj_set_pos(widgets->pct, 0, L.pct_y);
+
+    // Initialize the persistent RGB565 image descriptors once. Each
+    // panel (top/bottom) gets its own buffer + dsc so they can be
+    // updated independently when their % values diverge.
+    if (widgets == &panel_top) {
+        pct_image_dsc_init(&pct_dsc_top, pct_buf_top);
+        lv_canvas_set_buffer(widgets->pct, pct_buf_top,
+                             PCT_BUF_W, PCT_BUF_H, LV_COLOR_FORMAT_RGB565);
+    } else {
+        pct_image_dsc_init(&pct_dsc_bot, pct_buf_bot);
+        lv_canvas_set_buffer(widgets->pct, pct_buf_bot,
+                             PCT_BUF_W, PCT_BUF_H, LV_COLOR_FORMAT_RGB565);
+    }
+    lv_obj_set_size(widgets->pct, PCT_BUF_W, PCT_BUF_H);
+    lv_canvas_fill_bg(widgets->pct, lv_color_hex(0x0000), LV_OPA_TRANSP);
 
     widgets->pill = lv_label_create(widgets->root);
     style_pill(widgets->pill, accent);
@@ -1465,7 +1584,7 @@ static void init_panel_widgets(PanelWidgets* widgets, lv_obj_t* parent, int x, i
     lv_obj_align(widgets->meta_right, LV_ALIGN_TOP_RIGHT, 0, meta_label_y);
 }
 
-static void set_usage_panel(PanelWidgets* widgets, const UsagePanelData* panel, bool top) {
+static void set_usage_panel(PanelWidgets* widgets, const UsagePanelData* panel, bool top, lv_color_t accent) {
     char heading[40];
     char meta_left[40];
     char meta_right[48];
@@ -1476,8 +1595,18 @@ static void set_usage_panel(PanelWidgets* widgets, const UsagePanelData* panel, 
 
     if (L.show_kicker) lv_label_set_text(widgets->kicker, heading);
 
+    // 014 Quad-Glow: helper that re-renders the 5×7 pixel-art digits
+    // into the card's RGB565 canvas. Picks a colour that matches the
+    // card accent so primary = cyan, secondary = orange/green.
+    auto render_pct = [&](const char* str, lv_color_t color) {
+        uint16_t* buf = (widgets == &panel_top) ? pct_buf_top : pct_buf_bot;
+        render_pixel_pct(buf, PCT_BUF_W, PCT_BUF_H, str,
+                         lv_color_to_rgb565(color));
+        lv_obj_invalidate(widgets->pct);
+    };
+
     if (!panel || !panel->valid) {
-        lv_label_set_text(widgets->pct, "---%");
+        render_pct("---%", lv_color_hex(0xa9b2c2));
         lv_label_set_text(widgets->pill, default_pill_text(top));
         if (widgets->bar_fill) lv_obj_set_width(widgets->bar_fill, 0);
         lv_label_set_text(widgets->meta_left, meta_left);
@@ -1493,13 +1622,22 @@ static void set_usage_panel(PanelWidgets* widgets, const UsagePanelData* panel, 
         && (strcmp(panel->kind, "wallet_depletion") == 0
             || strcmp(panel->kind, "budget_daily") == 0)
     );
+    const lv_color_t pct_color = is_neon_glow(L)
+        ? (secondary_card(accent) ? COL_NEON_GREEN : COL_NEON_CYAN)
+        : COL_TEXT;
     if (prepaid_card) {
-        lv_label_set_text(widgets->pct, panel->subtext[0] ? panel->subtext : "---");
+        // Prepaid: pixel-art the subtext in 2-digit (or 3-digit) chunks.
+        // Easiest path: render only the first 3 characters to fit the
+        // 76-px buffer, fallback to "$$$" if the subtext is empty.
+        char sub_short[4] = {0};
+        const char* s = panel->subtext[0] ? panel->subtext : "$$$";
+        for (int i = 0; i < 3 && s[i]; i++) sub_short[i] = s[i];
+        render_pct(sub_short, pct_color);
         lv_label_set_text(widgets->pill, panel->label[0] ? panel->label : default_pill_text(top));
     } else {
-        char pct_str[16];
+        char pct_str[8];
         snprintf(pct_str, sizeof(pct_str), "%d%%", pct);
-        lv_label_set_text(widgets->pct, pct_str);
+        render_pct(pct_str, pct_color);
         lv_label_set_text(widgets->pill, panel->label[0] ? panel->label : default_pill_text(top));
     }
 
@@ -2087,8 +2225,8 @@ static void init_usage_screen(lv_obj_t* scr) {
     usage_group = make_transparent_box(usage_container, 0, 0, L.scr_w, L.scr_h);
     init_panel_widgets(&panel_top, usage_group, L.card_x, L.card1_y, neon_top(L));
     init_panel_widgets(&panel_bottom, usage_group, L.card2_x, L.card2_y, neon_bottom(L));
-    set_usage_panel(&panel_top, nullptr, true);
-    set_usage_panel(&panel_bottom, nullptr, false);
+    set_usage_panel(&panel_top, nullptr, true, neon_top(L));
+    set_usage_panel(&panel_bottom, nullptr, false, neon_bottom(L));
 
     build_pair_group(usage_container);
     build_idle_group(usage_container);
@@ -2129,8 +2267,8 @@ void ui_update(const UsageData* data) {
         && strcmp(data->mode, "weekly_only") == 0
     );
     set_single_weekly_limit_layout(single_weekly_limit);
-    set_usage_panel(&panel_top, &data->top, true);
-    set_usage_panel(&panel_bottom, &data->bottom, false);
+    set_usage_panel(&panel_top, &data->top, true, neon_top(L));
+    set_usage_panel(&panel_bottom, &data->bottom, false, neon_bottom(L));
 
     update_view_state();
 }
