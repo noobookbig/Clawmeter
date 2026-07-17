@@ -100,8 +100,8 @@ static void title_text_color_anim_cb(void* var, int32_t v) {
 // reverse) — same timing as the title sweep so the whole header
 // "breathes" in lock-step. ctx carries the panel's specific string
 // ("37%") and buffer/canvas pointers so the same callback can drive
-// either top or bottom from a single lv_anim_t.
-struct PctRainbowCtx;
+// either top or bottom from a single lv_anim_t. (PctRainbowCtx struct
+// body is defined later, before the callback implementation.)
 static void pct_rainbow_anim_cb(void* var, int32_t v);  // forward decl
 
 // Resolve the two accent colors for the current layout mode.
@@ -377,13 +377,25 @@ static void pct_image_dsc_init(lv_image_dsc_t* dsc, uint32_t* buf) {
 // callback re-renders the ARGB8888 buffer with a 5-colour blend and
 // invalidates the canvas so LVGL re-uploads the new image on the next
 // frame. Persistent storage (lives for the program lifetime) so the
-// per-panel ctx survives between animation ticks.
+// per-panel ctx survives between animation ticks. `str` is mutable
+// so set_usage_panel can snprintf the current % into it before the
+// next animation tick re-renders — the digits track live data, not a
+// hardcoded placeholder.
 struct PctRainbowCtx {
     lv_obj_t* canvas;
     uint32_t* buf;
-    const char* str;
+    char str[8];
     lv_color_t base;
 };
+
+// 014 Quad-Glow: per-panel persistent state for the %-digit rainbow
+// animation. Two panels = two independent ctx + two independent anim_t.
+// Declared here (right after the struct body) so set_usage_panel can
+// reach the storage through a file-scope name.
+static PctRainbowCtx ctx_top;
+static PctRainbowCtx ctx_bot;
+static lv_anim_t anim_top;
+static lv_anim_t anim_bot;
 
 // Forward declarations — pct_rainbow_anim_cb uses lv_color_to_rgb565
 // and blend_rgb565 which are defined later in the file.
@@ -1609,18 +1621,18 @@ static void init_panel_widgets(PanelWidgets* widgets, lv_obj_t* parent, int x, i
     lv_obj_set_size(widgets->pct, PCT_BUF_W, PCT_BUF_H);
     lv_canvas_fill_bg(widgets->pct, lv_color_hex(0x0000), LV_OPA_TRANSP);
 
-    // 014 Quad-Glow: spin up a per-panel rainbow animation on the %
-    // digits. Persistent context (lives for the whole program) so the
-    // animation handler can reach the right canvas + buffer + string.
-    static PctRainbowCtx ctx_top;
-    static PctRainbowCtx ctx_bot;
-    static lv_anim_t anim_top;
-    static lv_anim_t anim_bot;
+    // 014 Quad-Glow: spin up a per-panel rainbow animation on the
+    // % digits. The ctx_top/ctx_bot and anim_top/anim_bot live at file
+    // scope (above) so the animation handler keeps running across BLE
+    // payload updates without losing context.
     PctRainbowCtx* use_ctx = (widgets == &panel_top) ? &ctx_top : &ctx_bot;
     lv_anim_t* use_anim = (widgets == &panel_top) ? &anim_top : &anim_bot;
     use_ctx->canvas = widgets->pct;
     use_ctx->buf    = (widgets == &panel_top) ? pct_buf_top : pct_buf_bot;
-    use_ctx->str    = (widgets == &panel_top) ? "37%" : "62%";
+    // str is set by set_usage_panel → render_pct lambda on every panel
+    // refresh; the placeholder seed here keeps it from being uninitialised
+    // before the first BLE payload arrives.
+    strcpy(use_ctx->str, widgets == &panel_top ? "0%" : "0%");
     use_ctx->base   = is_neon_glow(L)
         ? (secondary_card(accent) ? COL_NEON_GREEN : COL_NEON_CYAN)
         : COL_TEXT;
@@ -1676,9 +1688,15 @@ static void set_usage_panel(PanelWidgets* widgets, const UsagePanelData* panel, 
 
     // 014 Quad-Glow: helper that re-renders the 5×7 pixel-art digits
     // into the card's ARGB8888 canvas. Picks a colour that matches the
-    // card accent so primary = cyan, secondary = orange/green.
+    // card accent so primary = cyan, secondary = orange/green. The
+    // string is snprintf'd into the panel's persistent ctx->str so the
+    // per-panel animation callback can re-render it with the current
+    // value on every tick.
     auto render_pct = [&](const char* str, lv_color_t color) {
         uint32_t* buf = (widgets == &panel_top) ? pct_buf_top : pct_buf_bot;
+        PctRainbowCtx* ctx = (widgets == &panel_top) ? &ctx_top : &ctx_bot;
+        strncpy(ctx->str, str, sizeof(ctx->str) - 1);
+        ctx->str[sizeof(ctx->str) - 1] = '\0';
         render_pixel_pct(buf, PCT_BUF_W, PCT_BUF_H, str,
                          lv_color_to_rgb565(color));
         lv_obj_invalidate(widgets->pct);
