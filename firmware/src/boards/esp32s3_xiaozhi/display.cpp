@@ -71,10 +71,36 @@ void display_hal_init(void) {
 #define XIAOZHI_PANEL_INVERT 1
 #endif
 
+// Try 18-bit RGB666 (262 K colours) per the ES3C28P spec. The ILI9341V
+// panel supports three pixel formats via register 0x3A (COLMOD):
+//   0x55 = 16 bpp RGB565 (default — GFX Library + LVGL default)
+//   0x66 = 18 bpp RGB666 (262K colours per the LCDWIKI spec sheet)
+//   0x33 = 12 bpp RGB444 (rare)
+// We send 0x3A 0x66 after begin() to switch the panel. The GFX Library
+// still writes 16-bit pixels, which the panel zero-pads in the upper
+// 2 bits per channel — visually identical to RGB565 but the panel's
+// internal gamma tables are now configured for 18-bit input.
+//
+// Set XIAOZHI_PANEL_RGB666 to 1 to enable, 0 to disable.
+#ifndef XIAOZHI_PANEL_RGB666
+#define XIAOZHI_PANEL_RGB666 1
+#endif
+
 void display_hal_begin(void) {
     if (!gfx) return;
     gfx->begin();
     gfx->invertDisplay(XIAOZHI_PANEL_INVERT ? true : false);
+
+    if (XIAOZHI_PANEL_RGB666) {
+        // Switch panel to RGB666 (18 bpp) per spec. Use the GFX bus
+        // directly so we don't have to plumb writeCommand through a
+        // separate public API.
+        bus->beginWrite();
+        bus->writeCommand(0x3A);  // COLMOD
+        bus->write(0x66);         // 18 bits/pixel
+        bus->endWrite();
+        Serial.println("DISPLAY: switched ILI9341V to RGB666 18 bpp (per spec)");
+    }
 }
 
 void display_hal_set_brightness(uint8_t level) {
