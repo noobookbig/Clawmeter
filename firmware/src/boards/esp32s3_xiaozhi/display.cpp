@@ -78,12 +78,17 @@ void display_hal_init(void) {
 //   0x33 = 12 bpp RGB444 (rare)
 // We send 0x3A 0x66 after begin() to switch the panel. The GFX Library
 // still writes 16-bit pixels, which the panel zero-pads in the upper
-// 2 bits per channel — visually identical to RGB565 but the panel's
-// internal gamma tables are now configured for 18-bit input.
+// 2 bits per channel.
+//
+// Verified visually: the screen becomes washed-out / muddy. The
+// panel's 18-bit pixel-bus expects 18-bit data per write; sending
+// 16-bit zero-padded confuses the gamma tables. Keep the default at
+// RGB565 (0x55) — set to 1 only after a future LVGL_COLOR_DEPTH=32
+// + GFX draw24bit upgrade.
 //
 // Set XIAOZHI_PANEL_RGB666 to 1 to enable, 0 to disable.
 #ifndef XIAOZHI_PANEL_RGB666
-#define XIAOZHI_PANEL_RGB666 1
+#define XIAOZHI_PANEL_RGB666 0
 #endif
 
 void display_hal_begin(void) {
