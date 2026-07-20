@@ -29,25 +29,27 @@
 #define LCD_ROTATION         0
 #endif
 
-// ---- QSPI display (AXS15231B) ----
-// ESP32-S3-WROOM-1 maps the general-purpose SPI bus (FSPI/SPI2) to
-// these GPIOs. QSPI mode uses 4 data lines + CLK + CS.
-#define LCD_DC               39   // FSPIQ (data 0 / MISO)
-#define LCD_CS               41   // FSPICS0
-#define LCD_SCLK             40   // FSPICLK
-#define LCD_MOSI             42   // FSPID (data 1)
-#define LCD_D2               43   // FSPIWP (data 2)
-#define LCD_D3               44   // FSPIHD (data 3)
-#define LCD_RESET            48   // shared with RST
-#define LCD_BL               45   // backlight (active-high per AXS15231B datasheet)
+// ---- SPI display (AXS15231B) ----
+// Pin map recovered from LovyanGFX issue 868 — the JC3248W535C uses
+// plain 4-wire SPI on these GPIOs (DC not needed on the 3-wire path
+// AXS15231B exposes, but we'll use 4-wire mode for simplicity).
+// Confirmed working values: SCK=47, MOSI=21, CS=45, RST=1.
+#define LCD_DC               -1   // 3-wire SPI mode (DC not used)
+#define LCD_CS               45
+#define LCD_SCLK             47
+#define LCD_MOSI             21
+#define LCD_MISO             -1
+#define LCD_RESET            1
+#define LCD_BL               38   // user tried 1, 4, 38; 38 likely correct
+                                  // (Schematic labels the gate signal for
+                                  // the backlight driver as LCD_BL @ Q5 BSS138)
 
 // ---- Touch (AXS15231B built-in I2C) ----
-// Touch I2C uses different pins from the LCD SPI bus. AXS15231B
-// touch subsystem is reachable over I2C at 0x14 (or 0x5D per some
-// datasheet revisions). TODO: confirm the actual address by reading
-// 0x00 (chip-id) at both candidates.
-#define TP_SDA               47
-#define TP_SCL               44   // shared with LCD D3 — would need re-route
+// I2C bus is shared with the rest of the board. TODO: confirm the
+// actual address by reading 0x00 (chip-id) — the AXS15231B touch
+// subsystem is often at 0x14 but some batches are at 0x5D.
+#define TP_SDA               47   // shared with LCD SCLK — see TODO
+#define TP_SCL               44   // shared with potential LCD D3
 #define TP_INT               38
 #define TP_RST               48
 #define FT6336_ADDR          0x14  // best-guess for AXS15231B touch subsystem

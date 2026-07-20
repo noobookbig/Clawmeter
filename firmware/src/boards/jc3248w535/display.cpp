@@ -70,12 +70,13 @@ void display_hal_init(void) {
     hard_reset_panel();
     backlight_begin();
 
-    // 4-lane QSPI bus. GFX Library maps the ESP32-S3 FSPI controller to
-    // these pins, the same one used for SPI mode on the same physical
-    // pads. For QSPI mode the additional D2/D3 lines are wired in.
-    bus = new Arduino_ESP32QSPI(LCD_CS, LCD_SCLK, LCD_MOSI, -1, LCD_D2, LCD_D3);
-    Serial.printf("QSPI: CS=%d SCK=%d D0=%d D1=%d D2=%d D3=%d\n",
-                  LCD_CS, LCD_SCLK, LCD_MOSI, LCD_D2, LCD_D3);
+    // 4-wire SPI bus (not QSPI). The JC3248W535C ships with the AXS15231B
+    // in 3-wire SPI mode (DC tied off-chip), so we use the same SPI bus
+    // but pass DC = -1 to the GFX constructor. Pin map recovered from
+    // LovyanGFX issue 868 (SCK=47, MOSI=21, CS=45, RST=1).
+    bus = new Arduino_ESP32SPI(LCD_DC, LCD_CS, LCD_SCLK, LCD_MOSI, LCD_MISO, FSPI, true);
+    Serial.printf("SPI: CS=%d SCK=%d MOSI=%d DC=%d RST=%d\n",
+                  LCD_CS, LCD_SCLK, LCD_MOSI, LCD_DC, LCD_RESET);
 
     // The GFX Library doesn't ship a driver for AXS15231B specifically;
     // it's register-compatible with the ST7789 family for the most part

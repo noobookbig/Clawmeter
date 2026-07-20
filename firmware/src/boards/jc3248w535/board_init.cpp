@@ -14,8 +14,9 @@ extern "C" void board_init(void) {
     digitalWrite(LCD_RESET, HIGH);
     delay(120);  // AXS15231B boot window
 
-    // Backlight pin is active-high per the AXS15231B reference design.
-    // Keep it OFF until display_hal_begin() takes over.
+    // Backlight (Q5 BSS138 gate) is on GPIO 38 (per LovyanGFX user
+    // testing). Active-HIGH per the schematic. Keep it OFF until
+    // display_hal_begin() takes over.
     pinMode(LCD_BL, OUTPUT);
     digitalWrite(LCD_BL, LOW);
 
